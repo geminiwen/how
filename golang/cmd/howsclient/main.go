@@ -39,7 +39,7 @@ func main() {
 	defer stop()
 
 	conn, _, err := websocket.Dial(ctx, *serverURL, &websocket.DialOptions{
-		Subprotocols: []string{"hows.v1"},
+		Subprotocols: []string{"how.v1"},
 	})
 	if err != nil {
 		log.Fatalf("dial: %v", err)

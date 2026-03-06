@@ -1,4 +1,4 @@
-# HTTP over WebSocket (HOWS) Protocol Specification
+# HTTP over WebSocket (HOW) Protocol Specification
 
 **Version**: 0.2.0
 **Status**: Draft
@@ -6,7 +6,7 @@
 
 ## 1. Abstract
 
-This document specifies the HTTP over WebSocket (HOWS) protocol, which enables a server to send HTTP requests to clients through a WebSocket connection initiated by the client. This reverses the traditional HTTP request direction, allowing servers to reach clients behind firewalls or NAT without requiring the client to open any inbound ports.
+This document specifies the HTTP over WebSocket (HOW) protocol, which enables a server to send HTTP requests to clients through a WebSocket connection initiated by the client. This reverses the traditional HTTP request direction, allowing servers to reach clients behind firewalls or NAT without requiring the client to open any inbound ports.
 
 The protocol defines a message format using MessagePack serialization over WebSocket binary frames, supporting concurrent request multiplexing over a single connection.
 
@@ -14,17 +14,17 @@ The protocol defines a message format using MessagePack serialization over WebSo
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
 
-- **HOWS Server**: The component that accepts WebSocket connections from clients and dispatches HTTP requests to them.
-- **HOWS Client**: The component that initiates a WebSocket connection to the server, receives HTTP requests, and returns HTTP responses.
-- **Upstream Caller**: An external HTTP client that sends requests to the HOWS Server's proxy endpoint, which are then forwarded to the appropriate HOWS Client.
-- **Client ID**: A unique string identifier that each HOWS Client uses to register with the server, enabling request routing.
+- **HOW Server**: The component that accepts WebSocket connections from clients and dispatches HTTP requests to them.
+- **HOW Client**: The component that initiates a WebSocket connection to the server, receives HTTP requests, and returns HTTP responses.
+- **Upstream Caller**: An external HTTP client that sends requests to the HOW Server's proxy endpoint, which are then forwarded to the appropriate HOW Client.
+- **Client ID**: A unique string identifier that each HOW Client uses to register with the server, enabling request routing.
 - **Request ID**: A unique string (UUID v4) assigned to each HTTP request for multiplexing purposes.
 
 ## 3. Protocol Overview
 
 ```
 +------------------+         +------------------+         +------------------+
-|  Upstream Caller  | ------> |   HOWS Server    | ------> |   HOWS Client    |
+|  Upstream Caller  | ------> |   HOW Server    | ------> |   HOW Client    |
 |  (HTTP Client)   |  HTTP   | (Proxy + WS Hub) |   WS    | (Handler/Proxy)  |
 +------------------+         +------------------+         +------------------+
                                      ^                            |
@@ -32,7 +32,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
                                      +------- (client-initiated) -+
 ```
 
-1. The HOWS Client establishes a WebSocket connection to the HOWS Server.
+1. The HOW Client establishes a WebSocket connection to the HOW Server.
 2. The Client sends a `Register` message with its Client ID.
 3. The Server acknowledges with a `RegisterAck` message.
 4. An Upstream Caller sends an HTTP request to the Server's proxy endpoint, specifying the target Client ID.
@@ -46,19 +46,19 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ### 4.1. WebSocket Connection
 
-The HOWS protocol operates over WebSocket as defined in [RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455).
+The HOW protocol operates over WebSocket as defined in [RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455).
 
 - The Client MUST initiate the WebSocket connection to the Server.
 - The connection SHOULD use `wss://` (WebSocket Secure) in production environments.
-- The WebSocket subprotocol MUST be `hows.v1`. The Client MUST include this in the `Sec-WebSocket-Protocol` header during the handshake, and the Server MUST select it in the response.
-- All HOWS messages MUST be sent as WebSocket **binary frames**.
+- The WebSocket subprotocol MUST be `how.v1`. The Client MUST include this in the `Sec-WebSocket-Protocol` header during the handshake, and the Server MUST select it in the response.
+- All HOW messages MUST be sent as WebSocket **binary frames**.
 
 ### 4.2. Server Endpoints
 
-The HOWS Server exposes two HTTP endpoint groups:
+The HOW Server exposes two HTTP endpoint groups:
 
-- **WebSocket endpoint**: `GET /ws` - Accepts WebSocket upgrade requests from HOWS Clients.
-- **Proxy endpoint**: `{METHOD} /proxy/{client_id}/{path}` - Accepts HTTP requests from Upstream Callers. The `{client_id}` segment identifies the target HOWS Client. The remaining `{path}` (including query string) is forwarded as the request URL.
+- **WebSocket endpoint**: `GET /ws` - Accepts WebSocket upgrade requests from HOW Clients.
+- **Proxy endpoint**: `{METHOD} /proxy/{client_id}/{path}` - Accepts HTTP requests from Upstream Callers. The `{client_id}` segment identifies the target HOW Client. The remaining `{path}` (including query string) is forwarded as the request URL.
 
 ## 5. Message Format
 
@@ -220,7 +220,7 @@ If the `Error` is in response to a specific request, the `request_id` SHOULD be 
 ### 7.1. Connection Establishment
 
 1. The Client initiates a WebSocket connection to the Server's WebSocket endpoint.
-2. The Client MUST include `hows.v1` in the `Sec-WebSocket-Protocol` header.
+2. The Client MUST include `how.v1` in the `Sec-WebSocket-Protocol` header.
 3. Upon successful WebSocket handshake, the Client MUST send a `Register` message as its first message.
 4. The Client MUST NOT send any other messages before receiving a `RegisterAck`.
 5. The Server MUST respond with a `RegisterAck` within 5 seconds. If the Client does not receive a `RegisterAck` within this time, it SHOULD close the connection and retry.
@@ -255,7 +255,7 @@ The Client SHOULD implement automatic reconnection with exponential backoff:
 
 ### 8.1. Proxy Request Flow
 
-When the HOWS Server receives an HTTP request from an Upstream Caller at the proxy endpoint:
+When the HOW Server receives an HTTP request from an Upstream Caller at the proxy endpoint:
 
 1. The Server extracts the `client_id` from the URL path.
 2. The Server looks up the Client in the registry.
@@ -276,7 +276,7 @@ When the HOWS Server receives an HTTP request from an Upstream Caller at the pro
 
 ### 8.2. Client Request Handling (Non-Streaming)
 
-When the HOWS Client receives an `HTTPRequest` message and the response body is fully available:
+When the HOW Client receives an `HTTPRequest` message and the response body is fully available:
 
 1. The Client extracts the `request_id` from the envelope.
 2. The Client processes the request through its configured handler:
@@ -291,7 +291,7 @@ If the Client encounters an error while processing:
 
 ### 8.3. Client Request Handling (Streaming)
 
-When the HOWS Client receives an `HTTPRequest` message and the response body is generated incrementally (e.g., SSE, large downloads):
+When the HOW Client receives an `HTTPRequest` message and the response body is generated incrementally (e.g., SSE, large downloads):
 
 1. The Client extracts the `request_id` from the envelope.
 2. The Client begins processing the request.

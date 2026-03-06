@@ -2,7 +2,15 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { createHOWSCaller, createHOWSHandler } from "./client";
+import { createHOWCaller, createHOWHandler } from "./client";
+import {
+  unmarshal,
+  marshal,
+  MessageType,
+  newHTTPResponseStart,
+  newHTTPResponseChunk,
+} from "../protocol/index";
+import type { Envelope } from "../protocol/index";
 
 /**
  * Starts an HTTP server with a WebSocket upgrade endpoint.
@@ -48,9 +56,9 @@ describe("Caller + Handler over WebSocket", () => {
   });
 
   it("simple request/response with RequestListener handler", async () => {
-    // Handler side: WS server + createHOWSHandler
+    // Handler side: WS server + createHOWHandler
     const { url, close } = await startWSServer((serverWs) => {
-      const handler = createHOWSHandler(
+      const handler = createHOWHandler(
         ((req: http.IncomingMessage, res: http.ServerResponse) => {
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("hello from handler");
@@ -61,11 +69,11 @@ describe("Caller + Handler over WebSocket", () => {
     });
     cleanups.push(close);
 
-    // Caller side: WS client + createHOWSCaller
+    // Caller side: WS client + createHOWCaller
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWSCaller(clientWs);
+    const caller = createHOWCaller(clientWs);
     clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
 
     const resp = await caller.request({
@@ -81,7 +89,7 @@ describe("Caller + Handler over WebSocket", () => {
 
   it("request with body", async () => {
     const { url, close } = await startWSServer((serverWs) => {
-      const handler = createHOWSHandler(
+      const handler = createHOWHandler(
         ((req: http.IncomingMessage, res: http.ServerResponse) => {
           const chunks: Buffer[] = [];
           req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -100,7 +108,7 @@ describe("Caller + Handler over WebSocket", () => {
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWSCaller(clientWs);
+    const caller = createHOWCaller(clientWs);
     clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
 
     const resp = await caller.request({
@@ -129,7 +137,7 @@ describe("Caller + Handler over WebSocket", () => {
 
     // WS server with ForwardHandler
     const { url, close } = await startWSServer((serverWs) => {
-      const handler = createHOWSHandler(target, serverWs);
+      const handler = createHOWHandler(target, serverWs);
       serverWs.on("message", (data: Buffer) => handler.handleMessage(data));
     });
     cleanups.push(close);
@@ -137,7 +145,7 @@ describe("Caller + Handler over WebSocket", () => {
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWSCaller(clientWs);
+    const caller = createHOWCaller(clientWs);
     clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
 
     const resp = await caller.request({
@@ -165,5 +173,96 @@ describe("Caller + Handler over WebSocket", () => {
     }
     const body = new TextDecoder().decode(bodyBytes);
     assert.equal(body, "forwarded: GET /hello");
+  });
+});
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+describe("Caller read timeout", () => {
+  const cleanups: (() => void)[] = [];
+  afterEach(() => {
+    for (const fn of cleanups) fn();
+    cleanups.length = 0;
+  });
+
+  it("times out when no response is received", async () => {
+    // Server receives request but never responds.
+    const { url, close } = await startWSServer((_serverWs) => {
+      // intentionally do nothing
+    });
+    cleanups.push(close);
+
+    const clientWs = await connectWS(url);
+    cleanups.push(() => clientWs.close());
+
+    const caller = createHOWCaller(clientWs, { readTimeout: 100 });
+    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+
+    const start = Date.now();
+    await assert.rejects(
+      caller.request({ method: "GET", url: "/hello", headers: {} }),
+      { message: "read timeout" },
+    );
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 1000, `timeout took too long: ${elapsed}ms`);
+  });
+
+  it("streaming chunks reset the timeout", async () => {
+    // Server sends Start + 3 chunks (each within timeout), then stops.
+    const { url, close } = await startWSServer((serverWs) => {
+      serverWs.on("message", async (data: Buffer) => {
+        const env = unmarshal(data) as Envelope;
+        if (env.type !== MessageType.HTTPRequest) return;
+        const requestID = env.request_id!;
+
+        // Send ResponseStart
+        serverWs.send(
+          Buffer.from(marshal(newHTTPResponseStart(requestID, 200, { "Content-Type": ["text/plain"] }))),
+        );
+
+        // Send 3 chunks, each within the timeout window
+        for (let i = 0; i < 3; i++) {
+          await sleep(50);
+          serverWs.send(
+            Buffer.from(marshal(newHTTPResponseChunk(requestID, new TextEncoder().encode(`chunk${i}`)))),
+          );
+        }
+        // Then stop — no End message. Caller should time out.
+      });
+    });
+    cleanups.push(close);
+
+    const clientWs = await connectWS(url);
+    cleanups.push(() => clientWs.close());
+
+    const caller = createHOWCaller(clientWs, { readTimeout: 100 });
+    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+
+    const start = Date.now();
+    // request() resolves on HTTPResponseStart with a streaming body.
+    // The timeout should fire after chunks stop arriving.
+    const resp = await caller.request({ method: "GET", url: "/stream", headers: {} });
+    assert.equal(resp.status_code, 200);
+
+    // The body stream should error with timeout
+    const stream = resp.body as unknown as ReadableStream<Uint8Array>;
+    const reader = stream.getReader();
+    const chunks: string[] = [];
+    await assert.rejects(async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+    }, { message: "read timeout" });
+
+    const elapsed = Date.now() - start;
+    // Should have received the 3 chunks before timing out
+    assert.equal(chunks.length, 3);
+    // 3 chunks at 50ms + 100ms timeout ≈ 250ms. Should be > 150ms (proving reset works).
+    assert.ok(elapsed >= 150, `timed out too early (chunks didn't reset timer): ${elapsed}ms`);
+    assert.ok(elapsed < 2000, `timeout took too long: ${elapsed}ms`);
   });
 });

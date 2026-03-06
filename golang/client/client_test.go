@@ -2,10 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -225,5 +227,140 @@ func TestCallerHandlerWithBodyOverWebSocket(t *testing.T) {
 	}
 	if string(resp.Body) != "hello world" {
 		t.Fatalf("expected body 'hello world', got %q", string(resp.Body))
+	}
+}
+
+func TestCallerReadTimeout(t *testing.T) {
+	ctx := context.Background()
+
+	// Server receives request but never responds.
+	ts := startWSServer(t, func(srvCtx context.Context, conn *websocket.Conn) {
+		defer conn.CloseNow()
+		for {
+			_, _, err := conn.Read(srvCtx)
+			if err != nil {
+				return
+			}
+			// intentionally do nothing — no response sent
+		}
+	})
+	defer ts.Close()
+
+	wsURL := "ws" + ts.URL[4:]
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	sender := &wsSendable{conn: conn, ctx: ctx}
+	caller := NewCaller(sender)
+	caller.ReadTimeout = 100 * time.Millisecond
+
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			caller.HandleMessage(ctx, data)
+		}
+	}()
+
+	start := time.Now()
+	_, err = caller.Request(ctx, &protocol.HTTPRequestPayload{
+		Method:  "GET",
+		URL:     "/hello",
+		Headers: map[string][]string{},
+	})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrReadTimeout) {
+		t.Fatalf("expected ErrReadTimeout, got %v", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("timeout took too long: %v", elapsed)
+	}
+}
+
+func TestCallerReadTimeoutResetByChunks(t *testing.T) {
+	ctx := context.Background()
+
+	// Server sends streaming chunks that keep the connection alive,
+	// then stops sending — caller should eventually time out.
+	ts := startWSServer(t, func(srvCtx context.Context, conn *websocket.Conn) {
+		defer conn.CloseNow()
+		sender := &wsSendable{conn: conn, ctx: srvCtx}
+
+		for {
+			_, data, err := conn.Read(srvCtx)
+			if err != nil {
+				return
+			}
+			env, err := protocol.Unmarshal(data)
+			if err != nil {
+				return
+			}
+			if env.Type != protocol.TypeHTTPRequest {
+				continue
+			}
+
+			// Send ResponseStart
+			startEnv, _ := protocol.NewHTTPResponseStart(env.RequestID, 200, map[string][]string{"Content-Type": {"text/plain"}})
+			startData, _ := protocol.Marshal(startEnv)
+			sender.Send(startData)
+
+			// Send 3 chunks, each within the timeout window
+			for i := 0; i < 3; i++ {
+				time.Sleep(50 * time.Millisecond)
+				chunkEnv, _ := protocol.NewHTTPResponseChunk(env.RequestID, []byte(fmt.Sprintf("chunk%d", i)))
+				chunkData, _ := protocol.Marshal(chunkEnv)
+				sender.Send(chunkData)
+			}
+
+			// Then stop sending — no End message. Caller should time out.
+		}
+	})
+	defer ts.Close()
+
+	wsURL := "ws" + ts.URL[4:]
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	sender := &wsSendable{conn: conn, ctx: ctx}
+	caller := NewCaller(sender)
+	caller.ReadTimeout = 100 * time.Millisecond
+
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			caller.HandleMessage(ctx, data)
+		}
+	}()
+
+	start := time.Now()
+	_, err = caller.Request(ctx, &protocol.HTTPRequestPayload{
+		Method:  "GET",
+		URL:     "/stream",
+		Headers: map[string][]string{},
+	})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrReadTimeout) {
+		t.Fatalf("expected ErrReadTimeout, got %v", err)
+	}
+	// 3 chunks at 50ms each = ~150ms of activity, then 100ms timeout = ~250ms total.
+	// Should be well under 1 second but definitely more than 100ms (proving chunks reset the timer).
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("timed out too early (chunks didn't reset timer): %v", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("timeout took too long: %v", elapsed)
 	}
 }

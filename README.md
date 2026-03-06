@@ -1,6 +1,6 @@
-# HOWS — HTTP over WebSocket
+# HOW — HTTP over WebSocket
 
-HOWS is a pure protocol library for tunneling [HTTP/1.1](https://datatracker.ietf.org/doc/html/rfc9110) requests/responses through [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) connections. It provides both TypeScript and Go implementations.
+HOW is a pure protocol library for tunneling [HTTP/1.1](https://datatracker.ietf.org/doc/html/rfc9110) requests/responses through [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) connections. It provides both TypeScript and Go implementations.
 
 The protocol uses [MessagePack](https://msgpack.org/) serialization over WebSocket binary frames, with [UUID v4](https://datatracker.ietf.org/doc/html/rfc9562#section-5.4) `request_id` based multiplexing. See [spec.md](spec.md) for the full protocol specification.
 
@@ -48,7 +48,7 @@ WebSocket naturally satisfies this interface (the `ws` library's WebSocket objec
 ### Installation
 
 ```bash
-npm install hows
+npm install how
 ```
 
 ### Handler — Receive and Handle Requests
@@ -57,15 +57,15 @@ Expose your HTTP handler or forward target over WebSocket:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWSHandler } from "hows";
+import { createHOWHandler } from "how";
 
 const ws = new WebSocket("ws://your-server/ws");
 
 // Option 1: Forward to a local HTTP service
-const handler = createHOWSHandler("http://localhost:3000", ws);
+const handler = createHOWHandler("http://localhost:3000", ws);
 
 // Option 2: Pass a RequestListener directly
-const handler = createHOWSHandler((req, res) => {
+const handler = createHOWHandler((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("hello");
 }, ws);
@@ -80,10 +80,10 @@ Send HTTP requests to a remote Handler:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWSCaller } from "hows";
+import { createHOWCaller } from "how";
 
 const ws = new WebSocket("ws://your-server/ws");
-const caller = createHOWSCaller(ws);
+const caller = createHOWCaller(ws);
 
 // Receive response messages
 ws.on("message", (data) => caller.handleMessage(data));
@@ -125,7 +125,7 @@ go get github.com/geminiwen/how
 
 ### Handler — Receive and Handle Requests
 
-The following example uses [Hertz](https://github.com/cloudwego/hertz) with [hertz-contrib/websocket](https://github.com/hertz-contrib/websocket) to set up a WebSocket server that handles HOWS requests:
+The following example uses [Hertz](https://github.com/cloudwego/hertz) with [hertz-contrib/websocket](https://github.com/hertz-contrib/websocket) to set up a WebSocket server that handles HOW requests:
 
 ```go
 package main
@@ -175,7 +175,7 @@ func main() {
     h.GET("/ws", func(ctx context.Context, c *app.RequestContext) {
         upgrader.Upgrade(c, func(conn *websocket.Conn) {
             sender := &wsSender{conn: conn}
-            howsHandler := client.NewHandler(handler, sender)
+            howHandler := client.NewHandler(handler, sender)
 
             for {
                 _, data, err := conn.ReadMessage()
@@ -183,7 +183,7 @@ func main() {
                     log.Println("read:", err)
                     break
                 }
-                howsHandler.HandleMessage(ctx, data)
+                howHandler.HandleMessage(ctx, data)
             }
         })
     })

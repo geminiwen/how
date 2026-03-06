@@ -166,7 +166,7 @@ func (h *ForwardHandler) ServeHTTPOverWSStream(ctx context.Context, req *protoco
 	return nil
 }
 
-// HTTPHandlerAdapter wraps a standard http.Handler as a HOWS Handler.
+// HTTPHandlerAdapter wraps a standard http.Handler as a HOW Handler.
 type HTTPHandlerAdapter struct {
 	Handler http.Handler
 }

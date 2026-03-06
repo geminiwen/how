@@ -1,6 +1,6 @@
-# HTTP Features in HOWS Protocol
+# HTTP Features in HOW Protocol
 
-本文档说明 HOWS 协议中 HTTP 请求/响应的支持范围和限制。
+本文档说明 HOW 协议中 HTTP 请求/响应的支持范围和限制。
 
 由于 HTTP 请求和响应被序列化为 MessagePack 消息通过 WebSocket 传输，并非所有 HTTP 特性都能被完整支持。
 
@@ -33,7 +33,7 @@
 
 ### 连接级特性
 - **HTTP/2 Server Push**: 不支持。
-- **WebSocket 升级**: 不支持在 HOWS 隧道内再嵌套 WebSocket 连接。
+- **WebSocket 升级**: 不支持在 HOW 隧道内再嵌套 WebSocket 连接。
 - **Keep-Alive / 持久连接**: 不适用。每个请求是独立的消息对。
 - **Connection 头部**: hop-by-hop 头部应被忽略。
 - **Upgrade 头部**: 不支持协议升级。
@@ -48,7 +48,7 @@
 
 ### 内容编码
 - **Transfer-Encoding**: 不适用。消息体作为原始字节传输。
-- **Content-Encoding (gzip, br 等)**: 透传。HOWS 本身不执行压缩/解压操作。
+- **Content-Encoding (gzip, br 等)**: 透传。HOW 本身不执行压缩/解压操作。
 
 ### 大文件
 - **非流式模式**: 请求体/响应体需放入单条消息，建议限制 10 MB。
@@ -60,17 +60,17 @@
 - **HTTP 摘要认证 (Digest Auth)**: 头部透传，但多轮质询需上层自行处理。
 
 ### 缓存
-- **条件请求**: 头部如实传输，但 HOWS 不执行缓存逻辑。
+- **条件请求**: 头部如实传输，但 HOW 不执行缓存逻辑。
 
 ### 其他
-- **Cookies**: 头部如实传输，HOWS 不维护 cookie jar。
-- **重定向**: 头部如实传输，HOWS 不自动跟随重定向。
+- **Cookies**: 头部如实传输，HOW 不维护 cookie jar。
+- **重定向**: 头部如实传输，HOW 不自动跟随重定向。
 - **Range 请求**: 头部如实传输，非流式模式下部分内容响应仍需完整缓冲。
 - **Multipart 表单**: 作为原始字节传输，受非流式模式消息大小限制。
 
 ## 已知行为差异
 
-| 场景 | 标准 HTTP | HOWS |
+| 场景 | 标准 HTTP | HOW |
 |------|----------|------|
 | 请求体传输 | 可以流式传输 | 必须完整缓冲 |
 | 响应体传输 | 可以流式传输 | 支持流式（v0.2.0）或完整缓冲 |

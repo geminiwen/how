@@ -1,2 +1,2 @@
-export { createHOWSCaller, createHOWSHandler } from "./client";
-export type { HOWSCaller, HOWSHandler, Sendable } from "./client";
+export { createHOWCaller, createHOWHandler, DEFAULT_READ_TIMEOUT } from "./client";
+export type { HOWCaller, HOWCallerOptions, HOWHandler, Sendable } from "./client";

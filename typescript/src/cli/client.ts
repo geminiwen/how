@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import WebSocket from "ws";
-import { createHOWSHandler } from "../client/index";
+import { createHOWHandler } from "../client/index";
 
 const { values } = parseArgs({
   options: {
@@ -14,8 +14,8 @@ if (!values.server || !values.target) {
   process.exit(1);
 }
 
-const ws = new WebSocket(values.server, ["hows.v1"]);
-const handler = createHOWSHandler(values.target, ws);
+const ws = new WebSocket(values.server, ["how.v1"]);
+const handler = createHOWHandler(values.target, ws);
 
 ws.on("open", () => console.log("connected"));
 ws.on("message", (data: Buffer) => handler.handleMessage(data));

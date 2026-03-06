@@ -28,28 +28,60 @@ export interface Sendable {
 
 // ─── Caller ───
 
-export interface HOWSCaller {
+export interface HOWCallerOptions {
+  /** Read timeout in milliseconds. Each received message resets the timer.
+   *  Default: 30000 (30s). Set to 0 or negative to disable. */
+  readTimeout?: number;
+}
+
+export interface HOWCaller {
   request(req: HTTPRequestPayload): Promise<HTTPResponsePayload>;
   handleMessage(data: Buffer | Uint8Array): void;
 }
 
+/** Default read timeout in milliseconds. */
+export const DEFAULT_READ_TIMEOUT = 30_000;
+
 interface PendingRequest {
   resolve: (resp: HTTPResponsePayload) => void;
   reject: (err: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
   // Streaming state
   streamController?: ReadableStreamDefaultController<Uint8Array>;
   streamHeaders?: Record<string, string[]>;
   streamStatusCode?: number;
 }
 
-export function createHOWSCaller(sender: Sendable): HOWSCaller {
+export function createHOWCaller(sender: Sendable, options?: HOWCallerOptions): HOWCaller {
   const pending = new Map<string, PendingRequest>();
+  const readTimeout = options?.readTimeout ?? DEFAULT_READ_TIMEOUT;
+
+  function startTimer(requestID: string, entry: PendingRequest): void {
+    if (readTimeout <= 0) return;
+    clearTimer(entry);
+    entry.timer = setTimeout(() => {
+      pending.delete(requestID);
+      if (entry.streamController) {
+        try { entry.streamController.error(new Error("read timeout")); } catch {}
+      }
+      entry.reject(new Error("read timeout"));
+    }, readTimeout);
+  }
+
+  function clearTimer(entry: PendingRequest): void {
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer);
+      entry.timer = undefined;
+    }
+  }
 
   return {
     request(req: HTTPRequestPayload): Promise<HTTPResponsePayload> {
       return new Promise((resolve, reject) => {
         const requestID = randomUUID();
-        pending.set(requestID, { resolve, reject });
+        const entry: PendingRequest = { resolve, reject };
+        pending.set(requestID, entry);
+        startTimer(requestID, entry);
         const env = newHTTPRequest(requestID, req);
         sender.send(Buffer.from(marshal(env)));
       });
@@ -62,8 +94,12 @@ export function createHOWSCaller(sender: Sendable): HOWSCaller {
         const entry = pending.get(requestID);
         if (!entry) return;
 
+        // Reset read timeout on every received message.
+        startTimer(requestID, entry);
+
         switch (env.type) {
           case MessageType.HTTPResponse: {
+            clearTimer(entry);
             pending.delete(requestID);
             const payload = decodePayload<HTTPResponsePayload>(env);
             entry.resolve(payload);
@@ -79,9 +115,6 @@ export function createHOWSCaller(sender: Sendable): HOWSCaller {
             });
             entry.streamStatusCode = start.status_code;
             entry.streamHeaders = start.headers;
-            // Resolve with a streaming response - body is a ReadableStream
-            // We convert to HTTPResponsePayload shape by collecting body later
-            // But for streaming, resolve immediately with stream info
             entry.resolve({
               status_code: start.status_code,
               headers: start.headers,
@@ -99,6 +132,7 @@ export function createHOWSCaller(sender: Sendable): HOWSCaller {
           }
 
           case MessageType.HTTPResponseEnd: {
+            clearTimer(entry);
             if (entry.streamController) {
               entry.streamController.close();
             }
@@ -107,6 +141,7 @@ export function createHOWSCaller(sender: Sendable): HOWSCaller {
           }
 
           case MessageType.Error: {
+            clearTimer(entry);
             pending.delete(requestID);
             const errPayload = decodePayload<ErrorPayload>(env);
             entry.reject(new Error(errPayload.message));
@@ -123,7 +158,7 @@ export function createHOWSCaller(sender: Sendable): HOWSCaller {
 
 // ─── Handler ───
 
-export interface HOWSHandler {
+export interface HOWHandler {
   handleMessage(data: Buffer | Uint8Array): void;
 }
 
@@ -327,10 +362,10 @@ function resolveHandler(handler: http.RequestListener | string): Handler {
   return new HTTPHandlerAdapter(handler);
 }
 
-export function createHOWSHandler(
+export function createHOWHandler(
   handler: http.RequestListener | string,
   sender: Sendable,
-): HOWSHandler {
+): HOWHandler {
   const resolved = resolveHandler(handler);
 
   function sendEnv(env: Envelope): void {

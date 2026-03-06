@@ -6,7 +6,7 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// MessageType identifies the type of a HOWS protocol message.
+// MessageType identifies the type of a HOW protocol message.
 type MessageType uint8
 
 const (
@@ -18,7 +18,7 @@ const (
 	TypeError             MessageType = 0xFF
 )
 
-// Envelope is the top-level wire format for all HOWS messages.
+// Envelope is the top-level wire format for all HOW messages.
 type Envelope struct {
 	Type      MessageType        `msgpack:"type"`
 	RequestID string             `msgpack:"request_id,omitempty"`

@@ -1,7 +1,7 @@
 {
-  "name": "hows",
+  "name": "how",
   "version": "0.1.0",
-  "description": "HTTP over WebSocket (HOWS) - TypeScript implementation",
+  "description": "HTTP over WebSocket (HOW) - TypeScript implementation",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

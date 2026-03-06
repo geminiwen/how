@@ -1,6 +1,6 @@
 import { encode, decode } from "@msgpack/msgpack";
 
-/** Message type identifiers matching the HOWS spec. */
+/** Message type identifiers matching the HOW spec. */
 export const MessageType = {
   HTTPRequest: 0x10,
   HTTPResponse: 0x11,
@@ -24,7 +24,7 @@ export const ErrorCode = {
   RequestCancelled: 1007,
 } as const;
 
-/** Top-level wire format for all HOWS messages. */
+/** Top-level wire format for all HOW messages. */
 export interface Envelope {
   type: MessageTypeValue;
   request_id?: string;

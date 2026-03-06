@@ -2,14 +2,19 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/geminiwen/how/protocol"
 )
+
+// ErrReadTimeout is returned when no message is received within the read timeout.
+var ErrReadTimeout = errors.New("read timeout")
 
 // Sendable abstracts the ability to send binary data over a transport.
 type Sendable interface {
@@ -18,11 +23,16 @@ type Sendable interface {
 
 // ─── Caller ───
 
+// DefaultReadTimeout is the default timeout for waiting for a response message.
+// Each received message (including HTTPResponseChunk) resets the timer.
+const DefaultReadTimeout = 30 * time.Second
+
 // Caller sends HTTPRequests and waits for responses.
 type Caller struct {
-	sender  Sendable
-	mu      sync.Mutex
-	pending map[string]chan *protocol.Envelope
+	sender      Sendable
+	mu          sync.Mutex
+	pending     map[string]chan *protocol.Envelope
+	ReadTimeout time.Duration // 0 means use DefaultReadTimeout; negative means no timeout
 }
 
 // NewCaller creates a new Caller.
@@ -31,6 +41,16 @@ func NewCaller(sender Sendable) *Caller {
 		sender:  sender,
 		pending: make(map[string]chan *protocol.Envelope),
 	}
+}
+
+func (c *Caller) readTimeout() time.Duration {
+	if c.ReadTimeout < 0 {
+		return 0 // no timeout
+	}
+	if c.ReadTimeout == 0 {
+		return DefaultReadTimeout
+	}
+	return c.ReadTimeout
 }
 
 // Request sends an HTTPRequest and waits for the response.
@@ -67,11 +87,31 @@ func (c *Caller) Request(ctx context.Context, req *protocol.HTTPRequestPayload) 
 	var resp *protocol.HTTPResponsePayload
 	var bodyChunks [][]byte
 
+	timeout := c.readTimeout()
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		defer timer.Stop()
+		timerC = timer.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-timerC:
+			return nil, ErrReadTimeout
 		case msg := <-ch:
+			if timer != nil {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(timeout)
+			}
 			switch msg.Type {
 			case protocol.TypeHTTPResponse:
 				payload, err := protocol.DecodePayload[protocol.HTTPResponsePayload](msg)
@@ -150,22 +190,22 @@ func (c *Caller) HandleMessage(ctx context.Context, data []byte) {
 
 // ─── Handler ───
 
-// HOWSHandler receives HTTPRequest messages and dispatches them to a Handler.
-type HOWSHandler struct {
+// HOWHandler receives HTTPRequest messages and dispatches them to a Handler.
+type HOWHandler struct {
 	handler Handler
 	sender  Sendable
 }
 
-// NewHandler creates a new HOWSHandler.
-func NewHandler(handler Handler, sender Sendable) *HOWSHandler {
-	return &HOWSHandler{
+// NewHandler creates a new HOWHandler.
+func NewHandler(handler Handler, sender Sendable) *HOWHandler {
+	return &HOWHandler{
 		handler: handler,
 		sender:  sender,
 	}
 }
 
 // HandleMessage processes an incoming message.
-func (h *HOWSHandler) HandleMessage(ctx context.Context, data []byte) {
+func (h *HOWHandler) HandleMessage(ctx context.Context, data []byte) {
 	env, err := protocol.Unmarshal(data)
 	if err != nil {
 		log.Printf("handler unmarshal error: %v", err)
@@ -180,7 +220,7 @@ func (h *HOWSHandler) HandleMessage(ctx context.Context, data []byte) {
 	}
 }
 
-func (h *HOWSHandler) handleRequest(ctx context.Context, env *protocol.Envelope) {
+func (h *HOWHandler) handleRequest(ctx context.Context, env *protocol.Envelope) {
 	reqPayload, err := protocol.DecodePayload[protocol.HTTPRequestPayload](env)
 	if err != nil {
 		log.Printf("decode request: %v", err)
@@ -231,7 +271,7 @@ func (h *HOWSHandler) handleRequest(ctx context.Context, env *protocol.Envelope)
 	h.sendEnv(respEnv)
 }
 
-func (h *HOWSHandler) sendEnv(env *protocol.Envelope) {
+func (h *HOWHandler) sendEnv(env *protocol.Envelope) {
 	data, err := protocol.Marshal(env)
 	if err != nil {
 		log.Printf("marshal error: %v", err)
