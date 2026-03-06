@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -165,6 +166,180 @@ func TestCallerHandlerForwardOverWebSocket(t *testing.T) {
 	if string(resp.Body) != "forwarded: GET /test" {
 		t.Fatalf("expected body 'forwarded: GET /test', got %q", string(resp.Body))
 	}
+}
+
+func TestForwardHandler(t *testing.T) {
+	// Target HTTP server that exercises various HTTP features.
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/echo":
+			// Echo back method, headers, query, and body.
+			w.Header().Set("Content-Type", "application/json")
+			body, _ := io.ReadAll(r.Body)
+			w.Header().Set("X-Echo-Method", r.Method)
+			w.Header().Set("X-Echo-Query", r.URL.RawQuery)
+			w.Header().Set("X-Custom-Header", r.Header.Get("X-Custom-Header"))
+			w.WriteHeader(200)
+			w.Write(body)
+
+		case "/status/404":
+			w.WriteHeader(404)
+			fmt.Fprint(w, "not found")
+
+		case "/status/500":
+			w.WriteHeader(500)
+			fmt.Fprint(w, "internal error")
+
+		default:
+			w.WriteHeader(200)
+			fmt.Fprintf(w, "ok: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer target.Close()
+
+	ctx := context.Background()
+
+	fwdHandler, err := ForwardTo(target.URL)
+	if err != nil {
+		t.Fatalf("ForwardTo: %v", err)
+	}
+
+	ts := startWSServer(t, func(srvCtx context.Context, conn *websocket.Conn) {
+		defer conn.CloseNow()
+		sender := &wsSendable{conn: conn, ctx: srvCtx}
+		handler := NewHandler(fwdHandler, sender)
+		for {
+			_, data, err := conn.Read(srvCtx)
+			if err != nil {
+				return
+			}
+			handler.HandleMessage(srvCtx, data)
+		}
+	})
+	defer ts.Close()
+
+	wsURL := "ws" + ts.URL[4:]
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	sender := &wsSendable{conn: conn, ctx: ctx}
+	caller := NewCaller(sender)
+
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			caller.HandleMessage(ctx, data)
+		}
+	}()
+
+	t.Run("POST with body and headers", func(t *testing.T) {
+		resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+			Method: "POST",
+			URL:    "/echo?foo=bar",
+			Headers: map[string][]string{
+				"Content-Type":    {"application/json"},
+				"X-Custom-Header": {"test-value"},
+			},
+			Body: []byte(`{"hello":"world"}`),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if string(resp.Body) != `{"hello":"world"}` {
+			t.Fatalf("body not forwarded: got %q", string(resp.Body))
+		}
+		// Verify headers were forwarded
+		if v := resp.Headers["X-Echo-Method"]; len(v) == 0 || v[0] != "POST" {
+			t.Fatalf("method not forwarded: %v", v)
+		}
+		if v := resp.Headers["X-Echo-Query"]; len(v) == 0 || v[0] != "foo=bar" {
+			t.Fatalf("query not forwarded: %v", v)
+		}
+		if v := resp.Headers["X-Custom-Header"]; len(v) == 0 || v[0] != "test-value" {
+			t.Fatalf("custom header not forwarded: %v", v)
+		}
+	})
+
+	t.Run("PUT request", func(t *testing.T) {
+		resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+			Method:  "PUT",
+			URL:     "/echo",
+			Headers: map[string][]string{"Content-Type": {"text/plain"}},
+			Body:    []byte("updated"),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if v := resp.Headers["X-Echo-Method"]; len(v) == 0 || v[0] != "PUT" {
+			t.Fatalf("PUT method not forwarded: %v", v)
+		}
+		if string(resp.Body) != "updated" {
+			t.Fatalf("body not forwarded: got %q", string(resp.Body))
+		}
+	})
+
+	t.Run("DELETE request", func(t *testing.T) {
+		resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+			Method:  "DELETE",
+			URL:     "/echo",
+			Headers: map[string][]string{},
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if v := resp.Headers["X-Echo-Method"]; len(v) == 0 || v[0] != "DELETE" {
+			t.Fatalf("DELETE method not forwarded: %v", v)
+		}
+	})
+
+	t.Run("404 status code", func(t *testing.T) {
+		resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+			Method:  "GET",
+			URL:     "/status/404",
+			Headers: map[string][]string{},
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			t.Fatalf("expected 404, got %d", resp.StatusCode)
+		}
+		if string(resp.Body) != "not found" {
+			t.Fatalf("expected 'not found', got %q", string(resp.Body))
+		}
+	})
+
+	t.Run("500 status code", func(t *testing.T) {
+		resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+			Method:  "GET",
+			URL:     "/status/500",
+			Headers: map[string][]string{},
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if resp.StatusCode != 500 {
+			t.Fatalf("expected 500, got %d", resp.StatusCode)
+		}
+		if string(resp.Body) != "internal error" {
+			t.Fatalf("expected 'internal error', got %q", string(resp.Body))
+		}
+	})
 }
 
 func TestCallerHandlerWithBodyOverWebSocket(t *testing.T) {

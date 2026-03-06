@@ -176,6 +176,153 @@ describe("Caller + Handler over WebSocket", () => {
   });
 });
 
+/** Helper to collect a ReadableStream body into a string. */
+async function readStreamBody(resp: { body?: Uint8Array }): Promise<string> {
+  const stream = resp.body as unknown as ReadableStream<Uint8Array>;
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+  const merged = new Uint8Array(totalLen);
+  let off = 0;
+  for (const c of chunks) {
+    merged.set(c, off);
+    off += c.length;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+describe("ForwardHandler", () => {
+  const cleanups: (() => void)[] = [];
+  afterEach(() => {
+    for (const fn of cleanups) fn();
+    cleanups.length = 0;
+  });
+
+  async function setup() {
+    // Target HTTP server that exercises various HTTP features.
+    const targetServer = http.createServer((req, res) => {
+      if (req.url?.startsWith("/echo")) {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          const body = Buffer.concat(chunks);
+          res.setHeader("Content-Type", "application/json");
+          res.setHeader("X-Echo-Method", req.method ?? "");
+          res.setHeader("X-Echo-Query", (req.url?.split("?")[1]) ?? "");
+          res.setHeader("X-Custom-Header", req.headers["x-custom-header"] ?? "");
+          res.writeHead(200);
+          res.end(body);
+        });
+        return;
+      }
+      if (req.url === "/status/404") {
+        res.writeHead(404);
+        res.end("not found");
+        return;
+      }
+      if (req.url === "/status/500") {
+        res.writeHead(500);
+        res.end("internal error");
+        return;
+      }
+      res.writeHead(200);
+      res.end(`ok: ${req.method} ${req.url}`);
+    });
+    await new Promise<void>((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => targetServer.close());
+    const targetAddr = targetServer.address();
+    if (!targetAddr || typeof targetAddr === "string") throw new Error("bad address");
+    const target = `http://127.0.0.1:${targetAddr.port}`;
+
+    const { url, close } = await startWSServer((serverWs) => {
+      const handler = createHOWHandler(target, serverWs);
+      serverWs.on("message", (data: Buffer) => handler.handleMessage(data));
+    });
+    cleanups.push(close);
+
+    const clientWs = await connectWS(url);
+    cleanups.push(() => clientWs.close());
+
+    const caller = createHOWCaller(clientWs);
+    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+
+    return caller;
+  }
+
+  it("POST with body and headers", async () => {
+    const caller = await setup();
+    const resp = await caller.request({
+      method: "POST",
+      url: "/echo?foo=bar",
+      headers: {
+        "Content-Type": ["application/json"],
+        "X-Custom-Header": ["test-value"],
+      },
+      body: new TextEncoder().encode('{"hello":"world"}'),
+    });
+    assert.equal(resp.status_code, 200);
+    const body = await readStreamBody(resp);
+    assert.equal(body, '{"hello":"world"}');
+    assert.equal(resp.headers["x-echo-method"]?.[0], "POST");
+    assert.equal(resp.headers["x-echo-query"]?.[0], "foo=bar");
+    assert.equal(resp.headers["x-custom-header"]?.[0], "test-value");
+  });
+
+  it("PUT request", async () => {
+    const caller = await setup();
+    const resp = await caller.request({
+      method: "PUT",
+      url: "/echo",
+      headers: { "Content-Type": ["text/plain"] },
+      body: new TextEncoder().encode("updated"),
+    });
+    assert.equal(resp.status_code, 200);
+    const body = await readStreamBody(resp);
+    assert.equal(body, "updated");
+    assert.equal(resp.headers["x-echo-method"]?.[0], "PUT");
+  });
+
+  it("DELETE request", async () => {
+    const caller = await setup();
+    const resp = await caller.request({
+      method: "DELETE",
+      url: "/echo",
+      headers: {},
+    });
+    assert.equal(resp.status_code, 200);
+    assert.equal(resp.headers["x-echo-method"]?.[0], "DELETE");
+  });
+
+  it("404 status code", async () => {
+    const caller = await setup();
+    const resp = await caller.request({
+      method: "GET",
+      url: "/status/404",
+      headers: {},
+    });
+    assert.equal(resp.status_code, 404);
+    const body = await readStreamBody(resp);
+    assert.equal(body, "not found");
+  });
+
+  it("500 status code", async () => {
+    const caller = await setup();
+    const resp = await caller.request({
+      method: "GET",
+      url: "/status/500",
+      headers: {},
+    });
+    assert.equal(resp.status_code, 500);
+    const body = await readStreamBody(resp);
+    assert.equal(body, "internal error");
+  });
+});
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
