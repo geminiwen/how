@@ -1,4 +1,4 @@
-module github.com/geminiwen/http-over-ws
+module github.com/geminiwen/how
 
 go 1.25.0
 

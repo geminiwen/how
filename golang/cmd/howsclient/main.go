@@ -8,7 +8,7 @@ import (
 	"syscall"
 
 	"github.com/coder/websocket"
-	"github.com/geminiwen/http-over-ws/client"
+	"github.com/geminiwen/how/client"
 )
 
 type wsSender struct {

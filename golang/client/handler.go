@@ -10,7 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 
-	"github.com/geminiwen/http-over-ws/protocol"
+	"github.com/geminiwen/how/protocol"
 )
 
 // Handler processes an HTTP request and returns a complete response (non-streaming).

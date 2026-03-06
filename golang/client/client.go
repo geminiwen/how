@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/geminiwen/http-over-ws/protocol"
+	"github.com/geminiwen/how/protocol"
 )
 
 // Sendable abstracts the ability to send binary data over a transport.
