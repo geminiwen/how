@@ -1,31 +1,31 @@
 # HOWS — HTTP over WebSocket
 
-HOWS 是一个纯协议库，通过 [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) 隧道传输 [HTTP/1.1](https://datatracker.ietf.org/doc/html/rfc9110) 请求/响应。提供 TypeScript 和 Go 两套实现。
+HOWS is a pure protocol library for tunneling [HTTP/1.1](https://datatracker.ietf.org/doc/html/rfc9110) requests/responses through [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) connections. It provides both TypeScript and Go implementations.
 
-协议使用 [MessagePack](https://msgpack.org/) 序列化，通过 WebSocket binary frames 传输，支持基于 [UUID v4](https://datatracker.ietf.org/doc/html/rfc9562#section-5.4) request_id 的多路复用。完整协议规范见 [spec.md](spec.md)。
+The protocol uses [MessagePack](https://msgpack.org/) serialization over WebSocket binary frames, with [UUID v4](https://datatracker.ietf.org/doc/html/rfc9562#section-5.4) `request_id` based multiplexing. See [spec.md](spec.md) for the full protocol specification.
 
-库本身**不包含** WebSocket 管理、HTTP server、连接路由——你自己管连接，库只负责协议编解码和请求分发。
+The library does **not** include WebSocket management, HTTP servers, or connection routing — you manage your own connections, and the library handles protocol encoding/decoding and request dispatching.
 
-## 核心概念
+## Core Concepts
 
-两个角色，通过 `Sendable` 接口与你的传输层对接：
+Two roles, connected to your transport layer via the `Sendable` interface:
 
-- **Caller** — 发送 HTTP 请求，等待响应（类似 `http.Client`）
-- **Handler** — 接收 HTTP 请求，调用本地 handler 处理，返回响应
+- **Caller** — sends HTTP requests, waits for responses (like an `http.Client`)
+- **Handler** — receives HTTP requests, dispatches to a local handler, sends back responses
 
 ```
-你的 Caller 端                      你的 Handler 端
+Your Caller Side                     Your Handler Side
      │                                    │
      │  caller.request(req)               │
      │  ──── HTTPRequest ──────────────►  │  handler.handleMessage(data)
-     │                                    │  → 调用你的 handler
+     │                                    │  → invokes your handler
      │  caller.handleMessage(data)        │
-     │  ◄──── HTTPResponse ────────────── │  → 自动发回响应
+     │  ◄──── HTTPResponse ────────────── │  → sends back response
      │                                    │
-     └──── WebSocket / 任意传输 ──────────┘
+     └──── WebSocket / any transport ─────┘
 ```
 
-`Sendable` 是唯一的传输抽象：
+`Sendable` is the only transport abstraction:
 
 ```typescript
 // TypeScript
@@ -41,19 +41,19 @@ type Sendable interface {
 }
 ```
 
-WebSocket 天然满足这个接口（`ws` 库的 WebSocket 对象直接有 `send` 方法）。
+WebSocket naturally satisfies this interface (the `ws` library's WebSocket object has a `send` method directly).
 
 ## TypeScript
 
-### 安装
+### Installation
 
 ```bash
 npm install hows
 ```
 
-### Handler — 接收请求并处理
+### Handler — Receive and Handle Requests
 
-把你的 HTTP handler 或转发目标通过 WebSocket 暴露出去：
+Expose your HTTP handler or forward target over WebSocket:
 
 ```typescript
 import { WebSocket } from "ws";
@@ -61,22 +61,22 @@ import { createHOWSHandler } from "hows";
 
 const ws = new WebSocket("ws://your-server/ws");
 
-// 方式 1: 转发到本地 HTTP 服务
+// Option 1: Forward to a local HTTP service
 const handler = createHOWSHandler("http://localhost:3000", ws);
 
-// 方式 2: 直接传入 RequestListener
+// Option 2: Pass a RequestListener directly
 const handler = createHOWSHandler((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("hello");
 }, ws);
 
-// 接收消息
+// Receive messages
 ws.on("message", (data) => handler.handleMessage(data));
 ```
 
-### Caller — 发送请求
+### Caller — Send Requests
 
-向远端 Handler 发起 HTTP 请求：
+Send HTTP requests to a remote Handler:
 
 ```typescript
 import { WebSocket } from "ws";
@@ -85,10 +85,10 @@ import { createHOWSCaller } from "hows";
 const ws = new WebSocket("ws://your-server/ws");
 const caller = createHOWSCaller(ws);
 
-// 接收响应消息
+// Receive response messages
 ws.on("message", (data) => caller.handleMessage(data));
 
-// 发请求
+// Send a request
 const resp = await caller.request({
   method: "GET",
   url: "/api/hello",
@@ -99,9 +99,9 @@ console.log(resp.status_code); // 200
 console.log(new TextDecoder().decode(resp.body)); // "hello"
 ```
 
-### 流式响应
+### Streaming Responses
 
-当 Handler 使用转发模式（string target），响应自动走流式协议。Caller 收到的 `resp.body` 是一个 `ReadableStream`：
+When the Handler uses forward mode (string target), responses automatically use the streaming protocol. The `resp.body` received by the Caller is a `ReadableStream`:
 
 ```typescript
 const resp = await caller.request({ method: "GET", url: "/stream", headers: {} });
@@ -117,101 +117,167 @@ while (true) {
 
 ## Go
 
-### 安装
+### Installation
 
 ```bash
 go get github.com/geminiwen/how
 ```
 
-### Handler — 接收请求并处理
+### Handler — Receive and Handle Requests
+
+The following example uses [Hertz](https://github.com/cloudwego/hertz) with [hertz-contrib/websocket](https://github.com/hertz-contrib/websocket) to set up a WebSocket server that handles HOWS requests:
 
 ```go
+package main
+
 import (
+    "context"
+    "fmt"
+    "log"
+    "net/http"
+    "sync"
+
+    "github.com/cloudwego/hertz/pkg/app"
+    "github.com/cloudwego/hertz/pkg/app/server"
+    "github.com/hertz-contrib/websocket"
+
+    "github.com/geminiwen/how/client"
+)
+
+// wsSender implements Sendable for hertz-contrib/websocket.
+type wsSender struct {
+    conn *websocket.Conn
+    mu   sync.Mutex
+}
+
+func (s *wsSender) Send(data []byte) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+var upgrader = websocket.HertzUpgrader{}
+
+func main() {
+    // Option 1: Forward to a local HTTP service
+    handler, _ := client.ForwardTo("http://localhost:3000")
+
+    // Option 2: Wrap an http.Handler
+    mux := http.NewServeMux()
+    mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+        fmt.Fprint(w, "hello")
+    })
+    handler = client.HTTPHandler(mux)
+
+    h := server.Default(server.WithHostPorts("0.0.0.0:8888"))
+    h.NoHijackConnPool = true
+
+    h.GET("/ws", func(ctx context.Context, c *app.RequestContext) {
+        upgrader.Upgrade(c, func(conn *websocket.Conn) {
+            sender := &wsSender{conn: conn}
+            howsHandler := client.NewHandler(handler, sender)
+
+            for {
+                _, data, err := conn.ReadMessage()
+                if err != nil {
+                    log.Println("read:", err)
+                    break
+                }
+                howsHandler.HandleMessage(ctx, data)
+            }
+        })
+    })
+
+    h.Spin()
+}
+```
+
+### Caller — Send Requests
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "sync"
+
+    "github.com/hertz-contrib/websocket"
+
     "github.com/geminiwen/how/client"
     "github.com/geminiwen/how/protocol"
 )
 
-// 方式 1: 转发到本地 HTTP 服务
-handler, _ := client.ForwardTo("http://localhost:3000")
+// wsSender implements Sendable for hertz-contrib/websocket.
+type wsSender struct {
+    conn *websocket.Conn
+    mu   sync.Mutex
+}
 
-// 方式 2: 包装 http.Handler
-mux := http.NewServeMux()
-mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprint(w, "hello")
-})
-handler := client.HTTPHandler(mux)
+func (s *wsSender) Send(data []byte) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
 
-// 方式 3: 实现 Handler 接口
-handler := client.HandlerFunc(func(ctx context.Context, req *protocol.HTTPRequestPayload) (*protocol.HTTPResponsePayload, error) {
-    return &protocol.HTTPResponsePayload{
-        StatusCode: 200,
-        Headers:    map[string][]string{"Content-Type": {"text/plain"}},
-        Body:       []byte("hello"),
-    }, nil
-})
-
-// 创建 HOWSHandler，接到 WebSocket
-sender := &wsSender{conn: wsConn, ctx: ctx}  // 你自己实现 Sendable
-h := client.NewHandler(handler, sender)
-
-// 读消息循环
-for {
-    _, data, err := wsConn.Read(ctx)
+func main() {
+    dialer := websocket.DefaultDialer
+    conn, _, err := dialer.Dial("ws://localhost:8888/ws", nil)
     if err != nil {
-        break
+        log.Fatal("dial:", err)
     }
-    h.HandleMessage(ctx, data)
+    defer conn.Close()
+
+    sender := &wsSender{conn: conn}
+    caller := client.NewCaller(sender)
+
+    // Read loop in background
+    go func() {
+        for {
+            _, data, err := conn.ReadMessage()
+            if err != nil {
+                return
+            }
+            caller.HandleMessage(context.Background(), data)
+        }
+    }()
+
+    // Send a request (blocks until response)
+    resp, err := caller.Request(context.Background(), &protocol.HTTPRequestPayload{
+        Method:  "GET",
+        URL:     "/hello",
+        Headers: map[string][]string{},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(resp.StatusCode)    // 200
+    fmt.Println(string(resp.Body))  // "hello"
 }
 ```
 
-### Caller — 发送请求
+The Go Caller automatically merges streaming responses (Start + Chunks + End) into a complete `HTTPResponsePayload`.
 
-```go
-sender := &wsSender{conn: wsConn, ctx: ctx}
-caller := client.NewCaller(sender)
+## Protocol
 
-// 后台读消息循环
-go func() {
-    for {
-        _, data, err := wsConn.Read(ctx)
-        if err != nil {
-            return
-        }
-        caller.HandleMessage(ctx, data)
-    }
-}()
+See [spec.md](spec.md) for details.
 
-// 发请求（阻塞等待响应）
-resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
-    Method:  "GET",
-    URL:     "/api/hello",
-    Headers: map[string][]string{},
-})
+Message types:
 
-fmt.Println(resp.StatusCode)    // 200
-fmt.Println(string(resp.Body))  // "hello"
-```
-
-Go 的 Caller 会自动把流式响应（Start + Chunks + End）合并成完整的 `HTTPResponsePayload` 返回。
-
-## 协议
-
-详见 [spec.md](spec.md)。
-
-消息类型：
-
-| Type | Code | 方向 |
-|------|------|------|
+| Type | Code | Direction |
+|------|------|-----------|
 | HTTPRequest | 0x10 | Caller → Handler |
 | HTTPResponse | 0x11 | Handler → Caller |
-| HTTPResponseStart | 0x12 | Handler → Caller（流式） |
-| HTTPResponseChunk | 0x13 | Handler → Caller（流式） |
-| HTTPResponseEnd | 0x14 | Handler → Caller（流式） |
-| Error | 0xFF | 双向 |
+| HTTPResponseStart | 0x12 | Handler → Caller (streaming) |
+| HTTPResponseChunk | 0x13 | Handler → Caller (streaming) |
+| HTTPResponseEnd | 0x14 | Handler → Caller (streaming) |
+| Error | 0xFF | Bidirectional |
 
-序列化：[MessagePack](https://msgpack.org/) over [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) binary frames。
+Serialization: [MessagePack](https://msgpack.org/) over [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) binary frames.
 
-## 相关规范
+## Related Specifications
 
 - [RFC 9110 — HTTP Semantics](https://datatracker.ietf.org/doc/html/rfc9110)
 - [RFC 6455 — The WebSocket Protocol](https://datatracker.ietf.org/doc/html/rfc6455)
