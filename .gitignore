@@ -5,9 +5,9 @@ typescript/dist/
 # Go
 golang/vendor/
 
-# Binaries
-embedded_handler
-forward_proxy
+# Binaries (root-level only)
+/embedded_handler
+/forward_proxy
 
 # OS
 .DS_Store
