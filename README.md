@@ -120,15 +120,15 @@ while (true) {
 ### 安装
 
 ```bash
-go get github.com/geminiwen/http-over-ws
+go get github.com/geminiwen/how
 ```
 
 ### Handler — 接收请求并处理
 
 ```go
 import (
-    "github.com/geminiwen/http-over-ws/client"
-    "github.com/geminiwen/http-over-ws/protocol"
+    "github.com/geminiwen/how/client"
+    "github.com/geminiwen/how/protocol"
 )
 
 // 方式 1: 转发到本地 HTTP 服务
