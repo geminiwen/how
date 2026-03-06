@@ -47,7 +47,7 @@
 - **HTTP Trailers**: 不支持。只传输常规头部。
 
 ### 内容编码
-- **Transfer-Encoding**: 不适用。消息体作为原始字节传输。
+- **Transfer-Encoding**: hop-by-hop 头部，由各跳的 HTTP 库自动处理（如 dechunk）。后端返回 `chunked` 响应时，ForwardHandler 读取后通过 HOW 流式协议（Start/Chunk/End）转发，业务无感知。HOW 协议层不转发此头部。
 - **Content-Encoding (gzip, br 等)**: 透传。HOW 本身不执行压缩/解压操作。
 
 ### 大文件
