@@ -1,4 +1,5 @@
 export {
+  ProtocolByte,
   MessageType,
   ErrorCode,
   marshal,

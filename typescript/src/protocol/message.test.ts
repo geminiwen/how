@@ -9,12 +9,33 @@ import {
   newError,
   MessageType,
   ErrorCode,
+  ProtocolByte,
 } from "./message";
 import type {
   HTTPRequestPayload,
   HTTPResponsePayload,
   ErrorPayload,
 } from "./message";
+
+describe("protocol byte", () => {
+  it("marshal output starts with 0x69", () => {
+    const env = newHTTPRequest("req-1", {
+      method: "GET",
+      url: "/",
+      headers: {},
+    });
+    const data = marshal(env);
+    assert.equal(data[0], ProtocolByte);
+  });
+
+  it("unmarshal rejects data without protocol byte", () => {
+    assert.throws(() => unmarshal(new Uint8Array([0x00, 0x01])), /invalid HOW protocol byte/);
+  });
+
+  it("unmarshal rejects empty data", () => {
+    assert.throws(() => unmarshal(new Uint8Array([])), /invalid HOW protocol byte/);
+  });
+});
 
 describe("protocol round-trip", () => {
   it("HTTPRequest", () => {

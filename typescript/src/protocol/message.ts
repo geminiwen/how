@@ -1,5 +1,8 @@
 import { encode, decode } from "@msgpack/msgpack";
 
+/** Protocol discriminator byte. Every HOW binary frame starts with this byte. */
+export const ProtocolByte = 0x69;
+
 /** Message type identifiers matching the HOW spec. */
 export const MessageType = {
   HTTPRequest: 0x10,
@@ -58,15 +61,22 @@ export interface ErrorPayload {
   message: string;
 }
 
-/** Serialize an Envelope to MessagePack bytes. */
+/** Serialize an Envelope to MessagePack bytes, prefixed with ProtocolByte. */
 export function marshal(env: Envelope): Uint8Array {
-  return encode(env);
+  const packed = encode(env);
+  const result = new Uint8Array(1 + packed.length);
+  result[0] = ProtocolByte;
+  result.set(packed, 1);
+  return result;
 }
 
-/** Deserialize MessagePack bytes into an Envelope. */
+/** Deserialize MessagePack bytes (with ProtocolByte prefix) into an Envelope. */
 export function unmarshal(data: Uint8Array | ArrayBuffer): Envelope {
   const buf = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-  return decode(buf) as Envelope;
+  if (buf.length === 0 || buf[0] !== ProtocolByte) {
+    throw new Error(`invalid HOW protocol byte: expected 0x${ProtocolByte.toString(16)}, got 0x${buf.length > 0 ? buf[0].toString(16) : 'empty'}`);
+  }
+  return decode(buf.subarray(1)) as Envelope;
 }
 
 /** Decode the payload field of an Envelope as a specific type. */

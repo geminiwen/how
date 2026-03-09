@@ -4,6 +4,40 @@ import (
 	"testing"
 )
 
+func TestProtocolByte(t *testing.T) {
+	env, err := NewHTTPRequest("req-1", &HTTPRequestPayload{
+		Method:  "GET",
+		URL:     "/",
+		Headers: map[string][]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if data[0] != ProtocolByte {
+		t.Fatalf("expected first byte 0x%02x, got 0x%02x", ProtocolByte, data[0])
+	}
+}
+
+func TestUnmarshalRejectsInvalidProtocolByte(t *testing.T) {
+	_, err := Unmarshal([]byte{0x00, 0x01})
+	if err == nil {
+		t.Fatal("expected error for invalid protocol byte")
+	}
+}
+
+func TestUnmarshalRejectsEmptyData(t *testing.T) {
+	_, err := Unmarshal([]byte{})
+	if err == nil {
+		t.Fatal("expected error for empty data")
+	}
+}
+
 func TestRoundTripHTTPRequest(t *testing.T) {
 	req := &HTTPRequestPayload{
 		Method:  "POST",

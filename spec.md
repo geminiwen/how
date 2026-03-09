@@ -66,6 +66,8 @@ The HOW Server exposes two HTTP endpoint groups:
 
 All messages are serialized using [MessagePack](https://msgpack.org/). MessagePack is a binary serialization format that is compact, fast, and supported across many programming languages.
 
+Every HOW binary frame MUST begin with the discriminator byte `0x69`, followed by the MessagePack-encoded Envelope. This allows HOW messages to coexist with other binary protocols on the same WebSocket connection. Receivers MUST validate that the first byte is `0x69`; frames that do not match MUST be discarded or result in an error.
+
 ### 5.2. Envelope
 
 Every WebSocket message is an Envelope, serialized as a MessagePack map with the following fields:

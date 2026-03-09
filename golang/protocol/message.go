@@ -6,6 +6,9 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+// ProtocolByte is the discriminator byte prefixed to every HOW binary frame.
+const ProtocolByte = 0x69
+
 // MessageType identifies the type of a HOW protocol message.
 type MessageType uint8
 
@@ -69,15 +72,28 @@ const (
 	ErrRequestCancelled uint16 = 1007
 )
 
-// Marshal serializes an Envelope to MessagePack bytes.
+// Marshal serializes an Envelope to MessagePack bytes, prefixed with ProtocolByte.
 func Marshal(env *Envelope) ([]byte, error) {
-	return msgpack.Marshal(env)
+	packed, err := msgpack.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]byte, 1+len(packed))
+	result[0] = ProtocolByte
+	copy(result[1:], packed)
+	return result, nil
 }
 
-// Unmarshal deserializes MessagePack bytes into an Envelope.
+// Unmarshal deserializes MessagePack bytes (with ProtocolByte prefix) into an Envelope.
 func Unmarshal(data []byte) (*Envelope, error) {
+	if len(data) == 0 || data[0] != ProtocolByte {
+		if len(data) == 0 {
+			return nil, fmt.Errorf("invalid HOW protocol byte: empty data")
+		}
+		return nil, fmt.Errorf("invalid HOW protocol byte: expected 0x%02x, got 0x%02x", ProtocolByte, data[0])
+	}
 	var env Envelope
-	if err := msgpack.Unmarshal(data, &env); err != nil {
+	if err := msgpack.Unmarshal(data[1:], &env); err != nil {
 		return nil, fmt.Errorf("unmarshal envelope: %w", err)
 	}
 	return &env, nil
