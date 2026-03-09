@@ -29,19 +29,57 @@ type Envelope struct {
 	Payload   msgpack.RawMessage `msgpack:"payload,omitempty"`
 }
 
+// RawBody is a byte slice that serializes as raw JSON (no base64) in JSON mode,
+// and as raw bytes in msgpack mode.
+type RawBody []byte
+
+// MarshalJSON outputs the raw bytes as-is (no base64 encoding).
+// If the content is valid JSON it stays as JSON; otherwise it is quoted as a string.
+func (r RawBody) MarshalJSON() ([]byte, error) {
+	if len(r) == 0 {
+		return []byte("null"), nil
+	}
+	if json.Valid(r) {
+		return r, nil
+	}
+	return json.Marshal(string(r))
+}
+
+// UnmarshalJSON accepts raw JSON or a JSON string and stores the bytes.
+func (r *RawBody) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*r = nil
+		return nil
+	}
+	// If it's a JSON string, decode it
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*r = []byte(s)
+		return nil
+	}
+	// Otherwise keep raw bytes (JSON object/array/number/bool)
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	*r = buf
+	return nil
+}
+
 // HTTPRequestPayload represents an HTTP request serialized for transport.
 type HTTPRequestPayload struct {
 	Method  string              `msgpack:"method" json:"method"`
 	URL     string              `msgpack:"url" json:"url"`
 	Headers map[string][]string `msgpack:"headers" json:"headers"`
-	Body    []byte              `msgpack:"body,omitempty" json:"body,omitempty"`
+	Body    RawBody             `msgpack:"body,omitempty" json:"body,omitempty"`
 }
 
 // HTTPResponsePayload represents an HTTP response serialized for transport.
 type HTTPResponsePayload struct {
 	StatusCode uint16              `msgpack:"status_code" json:"status_code"`
 	Headers    map[string][]string `msgpack:"headers" json:"headers"`
-	Body       []byte              `msgpack:"body,omitempty" json:"body,omitempty"`
+	Body       RawBody             `msgpack:"body,omitempty" json:"body,omitempty"`
 }
 
 // HTTPResponseStartPayload begins a streaming response (headers only, no body).
@@ -52,7 +90,7 @@ type HTTPResponseStartPayload struct {
 
 // HTTPResponseChunkPayload carries a chunk of streaming response body.
 type HTTPResponseChunkPayload struct {
-	Data []byte `msgpack:"data" json:"data"`
+	Data RawBody `msgpack:"data" json:"data"`
 }
 
 // ErrorPayload represents a protocol-level error.
