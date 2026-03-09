@@ -49,12 +49,6 @@ type Sendable interface {
 
 ## TypeScript
 
-### Installation
-
-```bash
-npm install how
-```
-
 ### Handler — Receive and Handle Requests
 
 Expose your HTTP handler or forward target over WebSocket:
