@@ -82,18 +82,32 @@ export function unmarshal(data: Uint8Array | ArrayBuffer): Envelope {
 /** Known binary field names in HOW payloads. */
 const binaryFields = new Set(["body", "data"]);
 
-/** Convert binary fields in payload to base64 strings for JSON serialization. */
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+
+/** Convert binary fields in payload to JSON-friendly values for text mode.
+ *  Matches Go's RawBody: valid JSON is embedded as-is, otherwise quoted as a string. */
 function encodeBinaryFields(obj: unknown): unknown {
   if (obj === null || obj === undefined) return obj;
   if (obj instanceof Uint8Array || Buffer.isBuffer(obj)) {
-    return Buffer.from(obj).toString("base64");
+    const str = textDecoder.decode(obj instanceof Uint8Array ? obj : new Uint8Array(obj));
+    try {
+      return JSON.parse(str);
+    } catch {
+      return str;
+    }
   }
   if (Array.isArray(obj)) return obj.map(encodeBinaryFields);
   if (typeof obj === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
       if (binaryFields.has(key) && (value instanceof Uint8Array || Buffer.isBuffer(value))) {
-        result[key] = Buffer.from(value as Uint8Array).toString("base64");
+        const str = textDecoder.decode(value instanceof Uint8Array ? value : new Uint8Array(value));
+        try {
+          result[key] = JSON.parse(str);
+        } catch {
+          result[key] = str;
+        }
       } else {
         result[key] = encodeBinaryFields(value);
       }
@@ -104,7 +118,7 @@ function encodeBinaryFields(obj: unknown): unknown {
 }
 
 /** Serialize an Envelope to a JSON string (text mode).
- *  Binary fields (body, data) are base64-encoded to match Go's encoding/json behavior. */
+ *  Binary fields (body, data) are serialized as raw JSON or strings (no base64). */
 export function marshalText(env: Envelope): string {
   const prepared = {
     type: env.type,
@@ -115,11 +129,15 @@ export function marshalText(env: Envelope): string {
 }
 
 /** Deserialize a JSON string into an Envelope (text mode).
- *  Base64-encoded binary fields are restored to Uint8Array. */
+ *  String body/data fields are converted to Uint8Array; embedded JSON objects are stringified first. */
 export function unmarshalText(data: string): Envelope {
   return JSON.parse(data, (key, value) => {
-    if (binaryFields.has(key) && typeof value === "string") {
-      return new Uint8Array(Buffer.from(value, "base64"));
+    if (binaryFields.has(key) && value != null) {
+      if (typeof value === "string") {
+        return textEncoder.encode(value);
+      }
+      // Embedded JSON object/array/number — stringify back to bytes
+      return textEncoder.encode(JSON.stringify(value));
     }
     return value;
   }) as Envelope;
