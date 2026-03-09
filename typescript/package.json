@@ -1,5 +1,5 @@
 {
-  "name": "@byted/how",
+  "name": "how",
   "version": "0.1.2",
   "description": "HTTP over WebSocket (HOW) - TypeScript implementation",
   "main": "dist/index.js",
@@ -14,8 +14,7 @@
     "client": "tsx src/cli/client.ts"
   },
   "publishConfig": {
-    "access": "public",
-    "registry": "https://bnpm.byted.org"
+    "access": "public"
   },
   "license": "MIT",
   "type": "module",

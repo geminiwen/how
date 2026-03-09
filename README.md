@@ -52,7 +52,7 @@ type Sendable interface {
 ### Installation
 
 ```bash
-npm install @byted/how
+npm install how
 ```
 
 ### Handler — Receive and Handle Requests
@@ -61,7 +61,7 @@ Expose your HTTP handler or forward target over WebSocket:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWHandler } from "@byted/how";
+import { createHOWHandler } from "how";
 
 const ws = new WebSocket("ws://your-server/ws");
 const sendable = {
@@ -97,7 +97,7 @@ Send HTTP requests to a remote Handler:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWCaller } from "@byted/how";
+import { createHOWCaller } from "how";
 
 const ws = new WebSocket("ws://your-server/ws");
 const sendable = {
