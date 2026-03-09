@@ -2,7 +2,11 @@
 
 HOW is a pure protocol library for tunneling [HTTP/1.1](https://datatracker.ietf.org/doc/html/rfc9110) requests/responses through [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) connections. It provides both TypeScript and Go implementations.
 
-The protocol uses [MessagePack](https://msgpack.org/) serialization over WebSocket binary frames, with [UUID v4](https://datatracker.ietf.org/doc/html/rfc9562#section-5.4) `request_id` based multiplexing. See [spec.md](spec.md) for the full protocol specification.
+The protocol supports two serialization modes:
+- **Binary mode** — [MessagePack](https://msgpack.org/) over WebSocket binary frames, prefixed with `0x69` discriminator byte
+- **Text mode** — JSON over WebSocket text frames
+
+Both modes use [UUID v4](https://datatracker.ietf.org/doc/html/rfc9562#section-5.4) `request_id` based multiplexing. See [spec.md](spec.md) for the full protocol specification.
 
 The library does **not** include WebSocket management, HTTP servers, or connection routing — you manage your own connections, and the library handles protocol encoding/decoding and request dispatching.
 
@@ -17,9 +21,9 @@ Two roles, connected to your transport layer via the `Sendable` interface:
 Your Caller Side                     Your Handler Side
      │                                    │
      │  caller.request(req)               │
-     │  ──── HTTPRequest ──────────────►  │  handler.handleMessage(data)
+     │  ──── HTTPRequest ──────────────►  │  handler.handleBinaryMessage(data)
      │                                    │  → invokes your handler
-     │  caller.handleMessage(data)        │
+     │  caller.handleBinaryMessage(data)  │
      │  ◄──── HTTPResponse ────────────── │  → sends back response
      │                                    │
      └──── WebSocket / any transport ─────┘
@@ -30,25 +34,25 @@ Your Caller Side                     Your Handler Side
 ```typescript
 // TypeScript
 interface Sendable {
-  send(data: Buffer | Uint8Array): void;
+  sendBytes(data: Buffer | Uint8Array): void;
+  sendText(data: string): void;
 }
 ```
 
 ```go
 // Go
 type Sendable interface {
-    Send(data []byte) error
+    SendBytes(data []byte) error
+    SendText(data string) error
 }
 ```
-
-WebSocket naturally satisfies this interface (the `ws` library's WebSocket object has a `send` method directly).
 
 ## TypeScript
 
 ### Installation
 
 ```bash
-npm install how
+npm install @byted/how
 ```
 
 ### Handler — Receive and Handle Requests
@@ -57,21 +61,34 @@ Expose your HTTP handler or forward target over WebSocket:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWHandler } from "how";
+import { createHOWHandler } from "@byted/how";
 
 const ws = new WebSocket("ws://your-server/ws");
+const sendable = {
+  sendBytes: (data: Buffer | Uint8Array) => ws.send(data),
+  sendText: (data: string) => ws.send(data),
+};
 
-// Option 1: Forward to a local HTTP service
-const handler = createHOWHandler("http://localhost:3000", ws);
+// Option 1: Forward to a local HTTP service (binary mode, default)
+const handler = createHOWHandler("http://localhost:3000", sendable);
 
 // Option 2: Pass a RequestListener directly
 const handler = createHOWHandler((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("hello");
-}, ws);
+}, sendable);
+
+// Option 3: Text mode (JSON over WebSocket text frames)
+const handler = createHOWHandler("http://localhost:3000", sendable, { mode: "text" });
 
 // Receive messages
-ws.on("message", (data) => handler.handleMessage(data));
+ws.on("message", (data, isBinary) => {
+  if (isBinary) {
+    handler.handleBinaryMessage(data);
+  } else {
+    handler.handleTextMessage(data.toString());
+  }
+});
 ```
 
 ### Caller — Send Requests
@@ -80,13 +97,28 @@ Send HTTP requests to a remote Handler:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWCaller } from "how";
+import { createHOWCaller } from "@byted/how";
 
 const ws = new WebSocket("ws://your-server/ws");
-const caller = createHOWCaller(ws);
+const sendable = {
+  sendBytes: (data: Buffer | Uint8Array) => ws.send(data),
+  sendText: (data: string) => ws.send(data),
+};
+
+// Binary mode (default)
+const caller = createHOWCaller(sendable);
+
+// Or text mode
+const caller = createHOWCaller(sendable, { mode: "text" });
 
 // Receive response messages
-ws.on("message", (data) => caller.handleMessage(data));
+ws.on("message", (data, isBinary) => {
+  if (isBinary) {
+    caller.handleBinaryMessage(data);
+  } else {
+    caller.handleTextMessage(data.toString());
+  }
+});
 
 // Send a request
 const resp = await caller.request({
@@ -120,7 +152,7 @@ while (true) {
 ### Installation
 
 ```bash
-go get github.com/geminiwen/how
+go get github.com/geminiwen/how/golang
 ```
 
 ### Handler — Receive and Handle Requests
@@ -141,7 +173,7 @@ import (
     "github.com/cloudwego/hertz/pkg/app/server"
     "github.com/hertz-contrib/websocket"
 
-    "github.com/geminiwen/how/client"
+    "github.com/geminiwen/how/golang/client"
 )
 
 // wsSender implements Sendable for hertz-contrib/websocket.
@@ -150,10 +182,16 @@ type wsSender struct {
     mu   sync.Mutex
 }
 
-func (s *wsSender) Send(data []byte) error {
+func (s *wsSender) SendBytes(data []byte) error {
     s.mu.Lock()
     defer s.mu.Unlock()
     return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+func (s *wsSender) SendText(data string) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.conn.WriteMessage(websocket.TextMessage, []byte(data))
 }
 
 var upgrader = websocket.HertzUpgrader{}
@@ -175,15 +213,22 @@ func main() {
     h.GET("/ws", func(ctx context.Context, c *app.RequestContext) {
         upgrader.Upgrade(c, func(conn *websocket.Conn) {
             sender := &wsSender{conn: conn}
+            // Binary mode (default)
             howHandler := client.NewHandler(handler, sender)
+            // Or text mode:
+            // howHandler := client.NewHandler(handler, sender, client.WithHandlerTextMode())
 
             for {
-                _, data, err := conn.ReadMessage()
+                msgType, data, err := conn.ReadMessage()
                 if err != nil {
                     log.Println("read:", err)
                     break
                 }
-                howHandler.HandleMessage(ctx, data)
+                if msgType == websocket.TextMessage {
+                    howHandler.HandleTextMessage(ctx, string(data))
+                } else {
+                    howHandler.HandleBinaryMessage(ctx, data)
+                }
             }
         })
     })
@@ -205,8 +250,8 @@ import (
 
     "github.com/hertz-contrib/websocket"
 
-    "github.com/geminiwen/how/client"
-    "github.com/geminiwen/how/protocol"
+    "github.com/geminiwen/how/golang/client"
+    "github.com/geminiwen/how/golang/protocol"
 )
 
 // wsSender implements Sendable for hertz-contrib/websocket.
@@ -215,10 +260,16 @@ type wsSender struct {
     mu   sync.Mutex
 }
 
-func (s *wsSender) Send(data []byte) error {
+func (s *wsSender) SendBytes(data []byte) error {
     s.mu.Lock()
     defer s.mu.Unlock()
     return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
+func (s *wsSender) SendText(data string) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.conn.WriteMessage(websocket.TextMessage, []byte(data))
 }
 
 func main() {
@@ -230,16 +281,23 @@ func main() {
     defer conn.Close()
 
     sender := &wsSender{conn: conn}
+    // Binary mode (default)
     caller := client.NewCaller(sender)
+    // Or text mode:
+    // caller := client.NewCaller(sender, client.WithTextMode())
 
     // Read loop in background
     go func() {
         for {
-            _, data, err := conn.ReadMessage()
+            msgType, data, err := conn.ReadMessage()
             if err != nil {
                 return
             }
-            caller.HandleMessage(context.Background(), data)
+            if msgType == websocket.TextMessage {
+                caller.HandleTextMessage(context.Background(), string(data))
+            } else {
+                caller.HandleBinaryMessage(context.Background(), data)
+            }
         }
     }()
 
@@ -275,7 +333,9 @@ Message types:
 | HTTPResponseEnd | 0x14 | Handler → Caller (streaming) |
 | Error | 0xFF | Bidirectional |
 
-Serialization: [MessagePack](https://msgpack.org/) over [WebSocket](https://datatracker.ietf.org/doc/html/rfc6455) binary frames.
+Serialization modes:
+- **Binary** — `0x69` + [MessagePack](https://msgpack.org/) over WebSocket binary frames (default)
+- **Text** — JSON over WebSocket text frames
 
 ## Related Specifications
 
