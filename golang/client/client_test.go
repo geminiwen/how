@@ -12,7 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/geminiwen/how/protocol"
+	"github.com/geminiwen/how/golang/protocol"
 )
 
 // wsSendable wraps a websocket.Conn as a Sendable.

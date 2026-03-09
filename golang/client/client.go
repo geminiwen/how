@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/geminiwen/how/protocol"
+	"github.com/geminiwen/how/golang/protocol"
 )
 
 // ErrReadTimeout is returned when no message is received within the read timeout.

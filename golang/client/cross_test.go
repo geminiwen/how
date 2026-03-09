@@ -12,7 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/geminiwen/how/protocol"
+	"github.com/geminiwen/how/golang/protocol"
 )
 
 // tsDir returns the absolute path to the typescript/ directory.

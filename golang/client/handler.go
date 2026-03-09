@@ -10,7 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 
-	"github.com/geminiwen/how/protocol"
+	"github.com/geminiwen/how/golang/protocol"
 )
 
 // Handler processes an HTTP request and returns a complete response (non-streaming).
