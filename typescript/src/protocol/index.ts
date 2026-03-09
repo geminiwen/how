@@ -4,6 +4,8 @@ export {
   ErrorCode,
   marshal,
   unmarshal,
+  marshalText,
+  unmarshalText,
   decodePayload,
   newHTTPRequest,
   newHTTPResponse,

@@ -15,10 +15,14 @@ if (!values.server || !values.target) {
 }
 
 const ws = new WebSocket(values.server, ["how.v1"]);
-const handler = createHOWHandler(values.target, ws);
+const sender = {
+  sendBytes: (data: Buffer | Uint8Array) => ws.send(data),
+  sendText: (data: string) => ws.send(data),
+};
+const handler = createHOWHandler(values.target, sender);
 
 ws.on("open", () => console.log("connected"));
-ws.on("message", (data: Buffer) => handler.handleMessage(data));
+ws.on("message", (data: Buffer) => handler.handleBinaryMessage(data));
 
 ws.on("error", (err) => {
   console.error("ws error:", err.message);

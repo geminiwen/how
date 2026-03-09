@@ -21,8 +21,12 @@ type wsSendable struct {
 	ctx  context.Context
 }
 
-func (s *wsSendable) Send(data []byte) error {
+func (s *wsSendable) SendBytes(data []byte) error {
 	return s.conn.Write(s.ctx, websocket.MessageBinary, data)
+}
+
+func (s *wsSendable) SendText(data string) error {
+	return s.conn.Write(s.ctx, websocket.MessageText, []byte(data))
 }
 
 // startWSServer starts an HTTP server with WebSocket upgrade.
@@ -58,7 +62,7 @@ func TestCallerHandlerOverWebSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
-			handler.HandleMessage(srvCtx, data)
+			handler.HandleBinaryMessage(srvCtx, data)
 		}
 	})
 	defer ts.Close()
@@ -81,7 +85,7 @@ func TestCallerHandlerOverWebSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 
@@ -126,7 +130,7 @@ func TestCallerHandlerForwardOverWebSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
-			handler.HandleMessage(srvCtx, data)
+			handler.HandleBinaryMessage(srvCtx, data)
 		}
 	})
 	defer ts.Close()
@@ -147,7 +151,7 @@ func TestCallerHandlerForwardOverWebSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 
@@ -213,7 +217,7 @@ func TestForwardHandler(t *testing.T) {
 			if err != nil {
 				return
 			}
-			handler.HandleMessage(srvCtx, data)
+			handler.HandleBinaryMessage(srvCtx, data)
 		}
 	})
 	defer ts.Close()
@@ -234,7 +238,7 @@ func TestForwardHandler(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 
@@ -362,7 +366,7 @@ func TestCallerHandlerWithBodyOverWebSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
-			handler.HandleMessage(srvCtx, data)
+			handler.HandleBinaryMessage(srvCtx, data)
 		}
 	})
 	defer ts.Close()
@@ -383,7 +387,7 @@ func TestCallerHandlerWithBodyOverWebSocket(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 
@@ -438,7 +442,7 @@ func TestCallerReadTimeout(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 
@@ -483,14 +487,14 @@ func TestCallerReadTimeoutResetByChunks(t *testing.T) {
 			// Send ResponseStart
 			startEnv, _ := protocol.NewHTTPResponseStart(env.RequestID, 200, map[string][]string{"Content-Type": {"text/plain"}})
 			startData, _ := protocol.Marshal(startEnv)
-			sender.Send(startData)
+			sender.SendBytes(startData)
 
 			// Send 3 chunks, each within the timeout window
 			for i := 0; i < 3; i++ {
 				time.Sleep(50 * time.Millisecond)
 				chunkEnv, _ := protocol.NewHTTPResponseChunk(env.RequestID, []byte(fmt.Sprintf("chunk%d", i)))
 				chunkData, _ := protocol.Marshal(chunkEnv)
-				sender.Send(chunkData)
+				sender.SendBytes(chunkData)
 			}
 
 			// Then stop sending — no End message. Caller should time out.
@@ -515,7 +519,7 @@ func TestCallerReadTimeoutResetByChunks(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 
@@ -537,5 +541,146 @@ func TestCallerReadTimeoutResetByChunks(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("timeout took too long: %v", elapsed)
+	}
+}
+
+func TestTextModeCallerHandlerOverWebSocket(t *testing.T) {
+	ctx := context.Background()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "hello from text handler")
+	})
+
+	ts := startWSServer(t, func(srvCtx context.Context, conn *websocket.Conn) {
+		defer conn.CloseNow()
+		sender := &wsSendable{conn: conn, ctx: srvCtx}
+		handler := NewHandler(HTTPHandler(mux), sender, WithHandlerTextMode())
+		for {
+			msgType, data, err := conn.Read(srvCtx)
+			if err != nil {
+				return
+			}
+			if msgType == websocket.MessageText {
+				handler.HandleTextMessage(srvCtx, string(data))
+			} else {
+				handler.HandleBinaryMessage(srvCtx, data)
+			}
+		}
+	})
+	defer ts.Close()
+
+	wsURL := "ws" + ts.URL[4:]
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	sender := &wsSendable{conn: conn, ctx: ctx}
+	caller := NewCaller(sender, WithTextMode())
+
+	go func() {
+		for {
+			msgType, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			if msgType == websocket.MessageText {
+				caller.HandleTextMessage(ctx, string(data))
+			} else {
+				caller.HandleBinaryMessage(ctx, data)
+			}
+		}
+	}()
+
+	resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+		Method:  "GET",
+		URL:     "/hello",
+		Headers: map[string][]string{},
+	})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if string(resp.Body) != "hello from text handler" {
+		t.Fatalf("expected body 'hello from text handler', got %q", string(resp.Body))
+	}
+}
+
+func TestTextModeForwardHandlerOverWebSocket(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "forwarded: %s %s", r.Method, r.URL.Path)
+	}))
+	defer target.Close()
+
+	ctx := context.Background()
+
+	fwdHandler, err := ForwardTo(target.URL)
+	if err != nil {
+		t.Fatalf("ForwardTo: %v", err)
+	}
+
+	ts := startWSServer(t, func(srvCtx context.Context, conn *websocket.Conn) {
+		defer conn.CloseNow()
+		sender := &wsSendable{conn: conn, ctx: srvCtx}
+		handler := NewHandler(fwdHandler, sender, WithHandlerTextMode())
+		for {
+			msgType, data, err := conn.Read(srvCtx)
+			if err != nil {
+				return
+			}
+			if msgType == websocket.MessageText {
+				handler.HandleTextMessage(srvCtx, string(data))
+			} else {
+				handler.HandleBinaryMessage(srvCtx, data)
+			}
+		}
+	})
+	defer ts.Close()
+
+	wsURL := "ws" + ts.URL[4:]
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	sender := &wsSendable{conn: conn, ctx: ctx}
+	caller := NewCaller(sender, WithTextMode())
+
+	go func() {
+		for {
+			msgType, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			if msgType == websocket.MessageText {
+				caller.HandleTextMessage(ctx, string(data))
+			} else {
+				caller.HandleBinaryMessage(ctx, data)
+			}
+		}
+	}()
+
+	resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+		Method:  "GET",
+		URL:     "/test",
+		Headers: map[string][]string{},
+	})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if string(resp.Body) != "forwarded: GET /test" {
+		t.Fatalf("expected body 'forwarded: GET /test', got %q", string(resp.Body))
 	}
 }

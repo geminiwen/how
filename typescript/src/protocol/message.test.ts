@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   marshal,
   unmarshal,
+  marshalText,
+  unmarshalText,
   decodePayload,
   newHTTPRequest,
   newHTTPResponse,
@@ -78,6 +80,49 @@ describe("protocol round-trip", () => {
   it("Error", () => {
     const env = newError("req-789", ErrorCode.ClientNotFound, "not found");
     const decoded = unmarshal(marshal(env));
+    assert.equal(decoded.type, MessageType.Error);
+    const payload = decodePayload<ErrorPayload>(decoded);
+    assert.equal(payload.code, ErrorCode.ClientNotFound);
+    assert.equal(payload.message, "not found");
+  });
+});
+
+describe("text mode round-trip", () => {
+  it("HTTPRequest", () => {
+    const req: HTTPRequestPayload = {
+      method: "POST",
+      url: "/api/users?page=1",
+      headers: { "Content-Type": ["application/json"] },
+      body: new TextEncoder().encode('{"name":"test"}'),
+    };
+    const env = newHTTPRequest("req-text-1", req);
+    const text = marshalText(env);
+    assert.equal(typeof text, "string");
+    const decoded = unmarshalText(text);
+    assert.equal(decoded.type, MessageType.HTTPRequest);
+    assert.equal(decoded.request_id, "req-text-1");
+    const payload = decodePayload<HTTPRequestPayload>(decoded);
+    assert.equal(payload.method, "POST");
+    assert.equal(payload.url, "/api/users?page=1");
+  });
+
+  it("HTTPResponse", () => {
+    const resp: HTTPResponsePayload = {
+      status_code: 200,
+      headers: { "Content-Type": ["text/plain"] },
+    };
+    const env = newHTTPResponse("req-text-2", resp);
+    const text = marshalText(env);
+    const decoded = unmarshalText(text);
+    assert.equal(decoded.type, MessageType.HTTPResponse);
+    const payload = decodePayload<HTTPResponsePayload>(decoded);
+    assert.equal(payload.status_code, 200);
+  });
+
+  it("Error", () => {
+    const env = newError("req-text-3", ErrorCode.ClientNotFound, "not found");
+    const text = marshalText(env);
+    const decoded = unmarshalText(text);
     assert.equal(decoded.type, MessageType.Error);
     const payload = decodePayload<ErrorPayload>(decoded);
     assert.equal(payload.code, ErrorCode.ClientNotFound);

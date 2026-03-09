@@ -51,7 +51,7 @@ The HOW protocol operates over WebSocket as defined in [RFC 6455](https://datatr
 - The Client MUST initiate the WebSocket connection to the Server.
 - The connection SHOULD use `wss://` (WebSocket Secure) in production environments.
 - The WebSocket subprotocol MUST be `how.v1`. The Client MUST include this in the `Sec-WebSocket-Protocol` header during the handshake, and the Server MUST select it in the response.
-- All HOW messages MUST be sent as WebSocket **binary frames**.
+- In binary mode, all HOW messages MUST be sent as WebSocket **binary frames**. In text mode, all HOW messages MUST be sent as WebSocket **text frames**.
 
 ### 4.2. Server Endpoints
 
@@ -64,9 +64,11 @@ The HOW Server exposes two HTTP endpoint groups:
 
 ### 5.1. Serialization
 
-All messages are serialized using [MessagePack](https://msgpack.org/). MessagePack is a binary serialization format that is compact, fast, and supported across many programming languages.
+HOW supports two serialization modes, chosen per connection at setup time:
 
-Every HOW binary frame MUST begin with the discriminator byte `0x69`, followed by the MessagePack-encoded Envelope. This allows HOW messages to coexist with other binary protocols on the same WebSocket connection. Receivers MUST validate that the first byte is `0x69`; frames that do not match MUST be discarded or result in an error.
+**Binary mode** (default): All messages are serialized using [MessagePack](https://msgpack.org/) and sent as WebSocket binary frames. Every HOW binary frame MUST begin with the discriminator byte `0x69`, followed by the MessagePack-encoded Envelope. This allows HOW messages to coexist with other binary protocols on the same WebSocket connection. Receivers MUST validate that the first byte is `0x69`; frames that do not match MUST be discarded or result in an error.
+
+**Text mode**: All messages are serialized as JSON and sent as WebSocket text frames. The Envelope is JSON-encoded with the same field names as binary mode. Binary payload fields (`body` in HTTPRequest/HTTPResponse, `data` in HTTPResponseChunk) MUST be base64-encoded strings in JSON. Both sides of a connection MUST use the same mode; mixing binary and text frames on the same connection is not permitted.
 
 ### 5.2. Envelope
 

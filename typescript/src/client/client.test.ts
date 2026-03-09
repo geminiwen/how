@@ -48,6 +48,14 @@ function connectWS(url: string): Promise<WebSocket> {
   });
 }
 
+/** Wrap a WebSocket as a Sendable. */
+function wrapSendable(ws: WebSocket) {
+  return {
+    sendBytes: (data: Buffer | Uint8Array) => ws.send(data),
+    sendText: (data: string) => ws.send(data),
+  };
+}
+
 describe("Caller + Handler over WebSocket", () => {
   const cleanups: (() => void)[] = [];
   afterEach(() => {
@@ -63,9 +71,9 @@ describe("Caller + Handler over WebSocket", () => {
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("hello from handler");
         }) as http.RequestListener,
-        serverWs,
+        wrapSendable(serverWs),
       );
-      serverWs.on("message", (data: Buffer) => handler.handleMessage(data));
+      serverWs.on("message", (data: Buffer) => handler.handleBinaryMessage(data));
     });
     cleanups.push(close);
 
@@ -73,8 +81,8 @@ describe("Caller + Handler over WebSocket", () => {
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWCaller(clientWs);
-    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+    const caller = createHOWCaller(wrapSendable(clientWs));
+    clientWs.on("message", (data: Buffer) => caller.handleBinaryMessage(data));
 
     const resp = await caller.request({
       method: "GET",
@@ -99,17 +107,17 @@ describe("Caller + Handler over WebSocket", () => {
             res.end(JSON.stringify({ echo: body }));
           });
         }) as http.RequestListener,
-        serverWs,
+        wrapSendable(serverWs),
       );
-      serverWs.on("message", (data: Buffer) => handler.handleMessage(data));
+      serverWs.on("message", (data: Buffer) => handler.handleBinaryMessage(data));
     });
     cleanups.push(close);
 
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWCaller(clientWs);
-    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+    const caller = createHOWCaller(wrapSendable(clientWs));
+    clientWs.on("message", (data: Buffer) => caller.handleBinaryMessage(data));
 
     const resp = await caller.request({
       method: "POST",
@@ -137,16 +145,16 @@ describe("Caller + Handler over WebSocket", () => {
 
     // WS server with ForwardHandler
     const { url, close } = await startWSServer((serverWs) => {
-      const handler = createHOWHandler(target, serverWs);
-      serverWs.on("message", (data: Buffer) => handler.handleMessage(data));
+      const handler = createHOWHandler(target, wrapSendable(serverWs));
+      serverWs.on("message", (data: Buffer) => handler.handleBinaryMessage(data));
     });
     cleanups.push(close);
 
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWCaller(clientWs);
-    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+    const caller = createHOWCaller(wrapSendable(clientWs));
+    clientWs.on("message", (data: Buffer) => caller.handleBinaryMessage(data));
 
     const resp = await caller.request({
       method: "GET",
@@ -240,16 +248,16 @@ describe("ForwardHandler", () => {
     const target = `http://127.0.0.1:${targetAddr.port}`;
 
     const { url, close } = await startWSServer((serverWs) => {
-      const handler = createHOWHandler(target, serverWs);
-      serverWs.on("message", (data: Buffer) => handler.handleMessage(data));
+      const handler = createHOWHandler(target, wrapSendable(serverWs));
+      serverWs.on("message", (data: Buffer) => handler.handleBinaryMessage(data));
     });
     cleanups.push(close);
 
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWCaller(clientWs);
-    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+    const caller = createHOWCaller(wrapSendable(clientWs));
+    clientWs.on("message", (data: Buffer) => caller.handleBinaryMessage(data));
 
     return caller;
   }
@@ -344,8 +352,8 @@ describe("Caller read timeout", () => {
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWCaller(clientWs, { readTimeout: 100 });
-    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+    const caller = createHOWCaller(wrapSendable(clientWs), { readTimeout: 100 });
+    clientWs.on("message", (data: Buffer) => caller.handleBinaryMessage(data));
 
     const start = Date.now();
     await assert.rejects(
@@ -384,8 +392,8 @@ describe("Caller read timeout", () => {
     const clientWs = await connectWS(url);
     cleanups.push(() => clientWs.close());
 
-    const caller = createHOWCaller(clientWs, { readTimeout: 100 });
-    clientWs.on("message", (data: Buffer) => caller.handleMessage(data));
+    const caller = createHOWCaller(wrapSendable(clientWs), { readTimeout: 100 });
+    clientWs.on("message", (data: Buffer) => caller.handleBinaryMessage(data));
 
     const start = Date.now();
     // request() resolves on HTTPResponseStart with a streaming body.
@@ -411,5 +419,103 @@ describe("Caller read timeout", () => {
     // 3 chunks at 50ms + 100ms timeout ≈ 250ms. Should be > 150ms (proving reset works).
     assert.ok(elapsed >= 150, `timed out too early (chunks didn't reset timer): ${elapsed}ms`);
     assert.ok(elapsed < 2000, `timeout took too long: ${elapsed}ms`);
+  });
+});
+
+describe("Text mode: Caller + Handler over WebSocket", () => {
+  const cleanups: (() => void)[] = [];
+  afterEach(() => {
+    for (const fn of cleanups) fn();
+    cleanups.length = 0;
+  });
+
+  it("simple request/response in text mode", async () => {
+    const { url, close } = await startWSServer((serverWs) => {
+      const handler = createHOWHandler(
+        ((req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("hello from text handler");
+        }) as http.RequestListener,
+        wrapSendable(serverWs),
+        { mode: "text" },
+      );
+      serverWs.on("message", (data: Buffer, isBinary: boolean) => {
+        if (isBinary) {
+          handler.handleBinaryMessage(data);
+        } else {
+          handler.handleTextMessage(data.toString());
+        }
+      });
+    });
+    cleanups.push(close);
+
+    const clientWs = await connectWS(url);
+    cleanups.push(() => clientWs.close());
+
+    const caller = createHOWCaller(wrapSendable(clientWs), { mode: "text" });
+    clientWs.on("message", (data: Buffer, isBinary: boolean) => {
+      if (isBinary) {
+        caller.handleBinaryMessage(data);
+      } else {
+        caller.handleTextMessage(data.toString());
+      }
+    });
+
+    const resp = await caller.request({
+      method: "GET",
+      url: "/test",
+      headers: {},
+    });
+
+    assert.equal(resp.status_code, 200);
+    const body = new TextDecoder().decode(new Uint8Array(resp.body as ArrayLike<number>));
+    assert.equal(body, "hello from text handler");
+  });
+
+  it("text mode with forward handler (streaming)", async () => {
+    const targetServer = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`forwarded: ${req.method} ${req.url}`);
+    });
+    await new Promise<void>((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => targetServer.close());
+    const targetAddr = targetServer.address();
+    if (!targetAddr || typeof targetAddr === "string") throw new Error("bad address");
+    const target = `http://127.0.0.1:${targetAddr.port}`;
+
+    const { url, close } = await startWSServer((serverWs) => {
+      const handler = createHOWHandler(target, wrapSendable(serverWs), { mode: "text" });
+      serverWs.on("message", (data: Buffer, isBinary: boolean) => {
+        if (isBinary) {
+          handler.handleBinaryMessage(data);
+        } else {
+          handler.handleTextMessage(data.toString());
+        }
+      });
+    });
+    cleanups.push(close);
+
+    const clientWs = await connectWS(url);
+    cleanups.push(() => clientWs.close());
+
+    const caller = createHOWCaller(wrapSendable(clientWs), { mode: "text" });
+    clientWs.on("message", (data: Buffer, isBinary: boolean) => {
+      if (isBinary) {
+        caller.handleBinaryMessage(data);
+      } else {
+        caller.handleTextMessage(data.toString());
+      }
+    });
+
+    const resp = await caller.request({
+      method: "GET",
+      url: "/hello",
+      headers: {},
+    });
+
+    assert.equal(resp.status_code, 200);
+    // Forward handler uses streaming, so body is a ReadableStream
+    const body = await readStreamBody(resp);
+    assert.equal(body, "forwarded: GET /hello");
   });
 });

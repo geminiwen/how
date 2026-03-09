@@ -27,6 +27,11 @@ if (!wsURL) {
 const ws = new WebSocket(wsURL);
 
 ws.on("open", () => {
+  const sender = {
+    sendBytes: (data: Buffer | Uint8Array) => ws.send(data),
+    sendText: (data: string) => ws.send(data),
+  };
+
   const handler = createHOWHandler(
     ((req: http.IncomingMessage, res: http.ServerResponse) => {
       if (req.url === "/hello") {
@@ -49,10 +54,10 @@ ws.on("open", () => {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("not found");
     }) as http.RequestListener,
-    ws,
+    sender,
   );
 
-  ws.on("message", (data: Buffer) => handler.handleMessage(data));
+  ws.on("message", (data: Buffer) => handler.handleBinaryMessage(data));
   // Signal readiness to the Go test by printing to stdout
   console.log("READY");
 });

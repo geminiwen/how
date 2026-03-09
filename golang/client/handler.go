@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,8 +33,12 @@ func (f HandlerFunc) ServeHTTPOverWS(ctx context.Context, req *protocol.HTTPRequ
 // ResponseWriter allows handlers to write streaming responses.
 type ResponseWriter struct {
 	requestID string
-	sendFn    func(env *protocol.Envelope)
+	handler   *HOWHandler
 	started   bool
+}
+
+func newResponseWriter(requestID string, handler *HOWHandler) *ResponseWriter {
+	return &ResponseWriter{requestID: requestID, handler: handler}
 }
 
 // WriteHeader sends the status code and headers (HTTPResponseStart).
@@ -45,28 +48,17 @@ func (rw *ResponseWriter) WriteHeader(statusCode uint16, headers map[string][]st
 		return
 	}
 	rw.started = true
-	env, err := protocol.NewHTTPResponseStart(rw.requestID, statusCode, headers)
-	if err != nil {
-		log.Printf("marshal response start: %v", err)
-		return
-	}
-	rw.sendFn(env)
+	rw.handler.sendResponseStart(rw.requestID, statusCode, headers)
 }
 
 // Write sends a chunk of response body (HTTPResponseChunk).
 func (rw *ResponseWriter) Write(data []byte) {
-	env, err := protocol.NewHTTPResponseChunk(rw.requestID, data)
-	if err != nil {
-		log.Printf("marshal response chunk: %v", err)
-		return
-	}
-	rw.sendFn(env)
+	rw.handler.sendResponseChunk(rw.requestID, data)
 }
 
 // Close signals the end of the streaming response (HTTPResponseEnd).
 func (rw *ResponseWriter) Close() {
-	env := protocol.NewHTTPResponseEnd(rw.requestID)
-	rw.sendFn(env)
+	rw.handler.sendResponseEnd(rw.requestID)
 }
 
 // ForwardHandler forwards requests to a local HTTP service.

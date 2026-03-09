@@ -15,8 +15,12 @@ type wsSender struct {
 	ctx  context.Context
 }
 
-func (s *wsSender) Send(data []byte) error {
+func (s *wsSender) SendBytes(data []byte) error {
 	return s.conn.Write(s.ctx, websocket.MessageBinary, data)
+}
+
+func (s *wsSender) SendText(data string) error {
+	return s.conn.Write(s.ctx, websocket.MessageText, []byte(data))
 }
 
 func main() {
@@ -46,6 +50,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("read: %v", err)
 		}
-		h.HandleMessage(ctx, data)
+		h.HandleBinaryMessage(ctx, data)
 	}
 }

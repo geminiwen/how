@@ -122,7 +122,7 @@ func TestCrossLanguage(t *testing.T) {
 			if err != nil {
 				return
 			}
-			caller.HandleMessage(ctx, data)
+			caller.HandleBinaryMessage(ctx, data)
 		}
 	}()
 

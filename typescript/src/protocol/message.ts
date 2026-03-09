@@ -79,6 +79,52 @@ export function unmarshal(data: Uint8Array | ArrayBuffer): Envelope {
   return decode(buf.subarray(1)) as Envelope;
 }
 
+/** Known binary field names in HOW payloads. */
+const binaryFields = new Set(["body", "data"]);
+
+/** Convert binary fields in payload to base64 strings for JSON serialization. */
+function encodeBinaryFields(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (obj instanceof Uint8Array || Buffer.isBuffer(obj)) {
+    return Buffer.from(obj).toString("base64");
+  }
+  if (Array.isArray(obj)) return obj.map(encodeBinaryFields);
+  if (typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      if (binaryFields.has(key) && (value instanceof Uint8Array || Buffer.isBuffer(value))) {
+        result[key] = Buffer.from(value as Uint8Array).toString("base64");
+      } else {
+        result[key] = encodeBinaryFields(value);
+      }
+    }
+    return result;
+  }
+  return obj;
+}
+
+/** Serialize an Envelope to a JSON string (text mode).
+ *  Binary fields (body, data) are base64-encoded to match Go's encoding/json behavior. */
+export function marshalText(env: Envelope): string {
+  const prepared = {
+    type: env.type,
+    request_id: env.request_id,
+    payload: encodeBinaryFields(env.payload),
+  };
+  return JSON.stringify(prepared);
+}
+
+/** Deserialize a JSON string into an Envelope (text mode).
+ *  Base64-encoded binary fields are restored to Uint8Array. */
+export function unmarshalText(data: string): Envelope {
+  return JSON.parse(data, (key, value) => {
+    if (binaryFields.has(key) && typeof value === "string") {
+      return new Uint8Array(Buffer.from(value, "base64"));
+    }
+    return value;
+  }) as Envelope;
+}
+
 /** Decode the payload field of an Envelope as a specific type. */
 export function decodePayload<T>(env: Envelope): T {
   return env.payload as T;

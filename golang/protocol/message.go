@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -30,34 +31,34 @@ type Envelope struct {
 
 // HTTPRequestPayload represents an HTTP request serialized for transport.
 type HTTPRequestPayload struct {
-	Method  string              `msgpack:"method"`
-	URL     string              `msgpack:"url"`
-	Headers map[string][]string `msgpack:"headers"`
-	Body    []byte              `msgpack:"body,omitempty"`
+	Method  string              `msgpack:"method" json:"method"`
+	URL     string              `msgpack:"url" json:"url"`
+	Headers map[string][]string `msgpack:"headers" json:"headers"`
+	Body    []byte              `msgpack:"body,omitempty" json:"body,omitempty"`
 }
 
 // HTTPResponsePayload represents an HTTP response serialized for transport.
 type HTTPResponsePayload struct {
-	StatusCode uint16              `msgpack:"status_code"`
-	Headers    map[string][]string `msgpack:"headers"`
-	Body       []byte              `msgpack:"body,omitempty"`
+	StatusCode uint16              `msgpack:"status_code" json:"status_code"`
+	Headers    map[string][]string `msgpack:"headers" json:"headers"`
+	Body       []byte              `msgpack:"body,omitempty" json:"body,omitempty"`
 }
 
 // HTTPResponseStartPayload begins a streaming response (headers only, no body).
 type HTTPResponseStartPayload struct {
-	StatusCode uint16              `msgpack:"status_code"`
-	Headers    map[string][]string `msgpack:"headers"`
+	StatusCode uint16              `msgpack:"status_code" json:"status_code"`
+	Headers    map[string][]string `msgpack:"headers" json:"headers"`
 }
 
 // HTTPResponseChunkPayload carries a chunk of streaming response body.
 type HTTPResponseChunkPayload struct {
-	Data []byte `msgpack:"data"`
+	Data []byte `msgpack:"data" json:"data"`
 }
 
 // ErrorPayload represents a protocol-level error.
 type ErrorPayload struct {
-	Code    uint16 `msgpack:"code"`
-	Message string `msgpack:"message"`
+	Code    uint16 `msgpack:"code" json:"code"`
+	Message string `msgpack:"message" json:"message"`
 }
 
 // Error code constants.
@@ -71,6 +72,100 @@ const (
 	ErrInternal         uint16 = 1006
 	ErrRequestCancelled uint16 = 1007
 )
+
+// TextEnvelope is the text-mode (JSON) counterpart of Envelope.
+// Payload is json.RawMessage instead of msgpack.RawMessage.
+type TextEnvelope struct {
+	Type      MessageType     `json:"type"`
+	RequestID string          `json:"request_id,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+// MarshalText serializes a TextEnvelope to a JSON string.
+func MarshalText(env *TextEnvelope) (string, error) {
+	data, err := json.Marshal(env)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// UnmarshalText deserializes a JSON string into a TextEnvelope.
+func UnmarshalText(data string) (*TextEnvelope, error) {
+	var env TextEnvelope
+	if err := json.Unmarshal([]byte(data), &env); err != nil {
+		return nil, fmt.Errorf("unmarshal text envelope: %w", err)
+	}
+	return &env, nil
+}
+
+// DecodeTextPayload decodes the JSON payload of a TextEnvelope into the given type.
+func DecodeTextPayload[T any](env *TextEnvelope) (*T, error) {
+	var v T
+	if err := json.Unmarshal(env.Payload, &v); err != nil {
+		return nil, fmt.Errorf("decode text payload (type=0x%02x): %w", env.Type, err)
+	}
+	return &v, nil
+}
+
+// encodeTextPayload encodes a value into a json.RawMessage.
+func encodeTextPayload(v any) (json.RawMessage, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// NewTextHTTPRequest creates an HTTPRequest TextEnvelope.
+func NewTextHTTPRequest(requestID string, req *HTTPRequestPayload) (*TextEnvelope, error) {
+	payload, err := encodeTextPayload(req)
+	if err != nil {
+		return nil, err
+	}
+	return &TextEnvelope{Type: TypeHTTPRequest, RequestID: requestID, Payload: payload}, nil
+}
+
+// NewTextHTTPResponse creates an HTTPResponse TextEnvelope.
+func NewTextHTTPResponse(requestID string, resp *HTTPResponsePayload) (*TextEnvelope, error) {
+	payload, err := encodeTextPayload(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &TextEnvelope{Type: TypeHTTPResponse, RequestID: requestID, Payload: payload}, nil
+}
+
+// NewTextHTTPResponseStart creates an HTTPResponseStart TextEnvelope.
+func NewTextHTTPResponseStart(requestID string, statusCode uint16, headers map[string][]string) (*TextEnvelope, error) {
+	payload, err := encodeTextPayload(&HTTPResponseStartPayload{StatusCode: statusCode, Headers: headers})
+	if err != nil {
+		return nil, err
+	}
+	return &TextEnvelope{Type: TypeHTTPResponseStart, RequestID: requestID, Payload: payload}, nil
+}
+
+// NewTextHTTPResponseChunk creates an HTTPResponseChunk TextEnvelope.
+func NewTextHTTPResponseChunk(requestID string, data []byte) (*TextEnvelope, error) {
+	payload, err := encodeTextPayload(&HTTPResponseChunkPayload{Data: data})
+	if err != nil {
+		return nil, err
+	}
+	return &TextEnvelope{Type: TypeHTTPResponseChunk, RequestID: requestID, Payload: payload}, nil
+}
+
+// NewTextHTTPResponseEnd creates an HTTPResponseEnd TextEnvelope.
+func NewTextHTTPResponseEnd(requestID string) *TextEnvelope {
+	return &TextEnvelope{Type: TypeHTTPResponseEnd, RequestID: requestID}
+}
+
+// NewTextError creates an Error TextEnvelope.
+func NewTextError(requestID string, code uint16, message string) (*TextEnvelope, error) {
+	payload, err := encodeTextPayload(&ErrorPayload{Code: code, Message: message})
+	if err != nil {
+		return nil, err
+	}
+	return &TextEnvelope{Type: TypeError, RequestID: requestID, Payload: payload}, nil
+}
 
 // Marshal serializes an Envelope to MessagePack bytes, prefixed with ProtocolByte.
 func Marshal(env *Envelope) ([]byte, error) {

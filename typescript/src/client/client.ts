@@ -4,6 +4,8 @@ import {
   MessageType,
   marshal,
   unmarshal,
+  marshalText,
+  unmarshalText,
   decodePayload,
   newHTTPRequest,
   newHTTPResponse,
@@ -23,7 +25,8 @@ import type {
 } from "../protocol/index";
 
 export interface Sendable {
-  send(data: Buffer | Uint8Array): void;
+  sendBytes(data: Buffer | Uint8Array): void;
+  sendText(data: string): void;
 }
 
 // ─── Caller ───
@@ -32,11 +35,14 @@ export interface HOWCallerOptions {
   /** Read timeout in milliseconds. Each received message resets the timer.
    *  Default: 30000 (30s). Set to 0 or negative to disable. */
   readTimeout?: number;
+  /** Serialization mode. Default: 'binary'. */
+  mode?: 'binary' | 'text';
 }
 
 export interface HOWCaller {
   request(req: HTTPRequestPayload): Promise<HTTPResponsePayload>;
-  handleMessage(data: Buffer | Uint8Array): void;
+  handleBinaryMessage(data: Buffer | Uint8Array): void;
+  handleTextMessage(data: string): void;
 }
 
 /** Default read timeout in milliseconds. */
@@ -55,6 +61,7 @@ interface PendingRequest {
 export function createHOWCaller(sender: Sendable, options?: HOWCallerOptions): HOWCaller {
   const pending = new Map<string, PendingRequest>();
   const readTimeout = options?.readTimeout ?? DEFAULT_READ_TIMEOUT;
+  const mode = options?.mode ?? 'binary';
 
   function startTimer(requestID: string, entry: PendingRequest): void {
     if (readTimeout <= 0) return;
@@ -75,6 +82,75 @@ export function createHOWCaller(sender: Sendable, options?: HOWCallerOptions): H
     }
   }
 
+  function sendEnvelope(env: Envelope): void {
+    if (mode === 'text') {
+      sender.sendText(marshalText(env));
+    } else {
+      sender.sendBytes(Buffer.from(marshal(env)));
+    }
+  }
+
+  function processEnvelope(env: Envelope): void {
+    const requestID = env.request_id ?? "";
+    const entry = pending.get(requestID);
+    if (!entry) return;
+
+    // Reset read timeout on every received message.
+    startTimer(requestID, entry);
+
+    switch (env.type) {
+      case MessageType.HTTPResponse: {
+        clearTimer(entry);
+        pending.delete(requestID);
+        const payload = decodePayload<HTTPResponsePayload>(env);
+        entry.resolve(payload);
+        break;
+      }
+
+      case MessageType.HTTPResponseStart: {
+        const start = decodePayload<HTTPResponseStartPayload>(env);
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            entry.streamController = controller;
+          },
+        });
+        entry.streamStatusCode = start.status_code;
+        entry.streamHeaders = start.headers;
+        entry.resolve({
+          status_code: start.status_code,
+          headers: start.headers,
+          body: stream as unknown as Uint8Array,
+        });
+        break;
+      }
+
+      case MessageType.HTTPResponseChunk: {
+        const chunk = decodePayload<HTTPResponseChunkPayload>(env);
+        if (entry.streamController) {
+          entry.streamController.enqueue(new Uint8Array(chunk.data as ArrayLike<number>));
+        }
+        break;
+      }
+
+      case MessageType.HTTPResponseEnd: {
+        clearTimer(entry);
+        if (entry.streamController) {
+          entry.streamController.close();
+        }
+        pending.delete(requestID);
+        break;
+      }
+
+      case MessageType.Error: {
+        clearTimer(entry);
+        pending.delete(requestID);
+        const errPayload = decodePayload<ErrorPayload>(env);
+        entry.reject(new Error(errPayload.message));
+        break;
+      }
+    }
+  }
+
   return {
     request(req: HTTPRequestPayload): Promise<HTTPResponsePayload> {
       return new Promise((resolve, reject) => {
@@ -83,74 +159,27 @@ export function createHOWCaller(sender: Sendable, options?: HOWCallerOptions): H
         pending.set(requestID, entry);
         startTimer(requestID, entry);
         const env = newHTTPRequest(requestID, req);
-        sender.send(Buffer.from(marshal(env)));
+        sendEnvelope(env);
       });
     },
 
-    handleMessage(data: Buffer | Uint8Array): void {
+    handleBinaryMessage(data: Buffer | Uint8Array): void {
       try {
         const env = unmarshal(data);
-        const requestID = env.request_id ?? "";
-        const entry = pending.get(requestID);
-        if (!entry) return;
-
-        // Reset read timeout on every received message.
-        startTimer(requestID, entry);
-
-        switch (env.type) {
-          case MessageType.HTTPResponse: {
-            clearTimer(entry);
-            pending.delete(requestID);
-            const payload = decodePayload<HTTPResponsePayload>(env);
-            entry.resolve(payload);
-            break;
-          }
-
-          case MessageType.HTTPResponseStart: {
-            const start = decodePayload<HTTPResponseStartPayload>(env);
-            const stream = new ReadableStream<Uint8Array>({
-              start(controller) {
-                entry.streamController = controller;
-              },
-            });
-            entry.streamStatusCode = start.status_code;
-            entry.streamHeaders = start.headers;
-            entry.resolve({
-              status_code: start.status_code,
-              headers: start.headers,
-              body: stream as unknown as Uint8Array,
-            });
-            break;
-          }
-
-          case MessageType.HTTPResponseChunk: {
-            const chunk = decodePayload<HTTPResponseChunkPayload>(env);
-            if (entry.streamController) {
-              entry.streamController.enqueue(new Uint8Array(chunk.data as ArrayLike<number>));
-            }
-            break;
-          }
-
-          case MessageType.HTTPResponseEnd: {
-            clearTimer(entry);
-            if (entry.streamController) {
-              entry.streamController.close();
-            }
-            pending.delete(requestID);
-            break;
-          }
-
-          case MessageType.Error: {
-            clearTimer(entry);
-            pending.delete(requestID);
-            const errPayload = decodePayload<ErrorPayload>(env);
-            entry.reject(new Error(errPayload.message));
-            break;
-          }
-        }
+        processEnvelope(env);
       } catch (err) {
         const message = err instanceof Error ? err.message : "unknown error";
         console.error(`caller message handling error: ${message}`);
+      }
+    },
+
+    handleTextMessage(data: string): void {
+      try {
+        const env = unmarshalText(data);
+        processEnvelope(env);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "unknown error";
+        console.error(`caller text message handling error: ${message}`);
       }
     },
   };
@@ -158,8 +187,14 @@ export function createHOWCaller(sender: Sendable, options?: HOWCallerOptions): H
 
 // ─── Handler ───
 
+export interface HOWHandlerOptions {
+  /** Serialization mode. Default: 'binary'. */
+  mode?: 'binary' | 'text';
+}
+
 export interface HOWHandler {
-  handleMessage(data: Buffer | Uint8Array): void;
+  handleBinaryMessage(data: Buffer | Uint8Array): void;
+  handleTextMessage(data: string): void;
 }
 
 interface Handler {
@@ -365,11 +400,17 @@ function resolveHandler(handler: http.RequestListener | string): Handler {
 export function createHOWHandler(
   handler: http.RequestListener | string,
   sender: Sendable,
+  options?: HOWHandlerOptions,
 ): HOWHandler {
   const resolved = resolveHandler(handler);
+  const mode = options?.mode ?? 'binary';
 
   function sendEnv(env: Envelope): void {
-    sender.send(Buffer.from(marshal(env)));
+    if (mode === 'text') {
+      sender.sendText(marshalText(env));
+    } else {
+      sender.sendBytes(Buffer.from(marshal(env)));
+    }
   }
 
   async function handleRequest(env: Envelope): Promise<void> {
@@ -413,22 +454,35 @@ export function createHOWHandler(
     }
   }
 
+  function processEnvelope(env: Envelope): void {
+    switch (env.type) {
+      case MessageType.HTTPRequest:
+        handleRequest(env);
+        break;
+
+      default:
+        console.log(`unexpected message type 0x${env.type.toString(16)}`);
+    }
+  }
+
   return {
-    handleMessage(data: Buffer | Uint8Array): void {
+    handleBinaryMessage(data: Buffer | Uint8Array): void {
       try {
         const env = unmarshal(data);
-
-        switch (env.type) {
-          case MessageType.HTTPRequest:
-            handleRequest(env);
-            break;
-
-          default:
-            console.log(`unexpected message type 0x${env.type.toString(16)}`);
-        }
+        processEnvelope(env);
       } catch (err) {
         const message = err instanceof Error ? err.message : "unknown error";
         console.error(`message handling error: ${message}`);
+      }
+    },
+
+    handleTextMessage(data: string): void {
+      try {
+        const env = unmarshalText(data);
+        processEnvelope(env);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "unknown error";
+        console.error(`text message handling error: ${message}`);
       }
     },
   };
