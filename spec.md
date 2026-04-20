@@ -255,6 +255,16 @@ The Client SHOULD implement automatic reconnection with exponential backoff:
 - Backoff factor: 2x
 - The Client SHOULD add random jitter (0-500ms) to avoid thundering herd.
 
+## 7.5. Caller Body Semantics
+
+Caller implementations SHOULD surface the response body uniformly as a stream, regardless of whether the peer sent a single `HTTPResponse` or an `HTTPResponseStart` + `HTTPResponseChunk`s + `HTTPResponseEnd` sequence:
+
+- On `HTTPResponse`, the buffered body MAY be exposed as a stream that yields the entire body in one chunk and then closes.
+- On `HTTPResponseStart`, the caller SHOULD resolve the request as soon as the status code and headers are available, and expose a stream that yields each subsequent `HTTPResponseChunk` incrementally, closing on `HTTPResponseEnd`.
+- If the transport closes unexpectedly mid-stream (§10.2), the stream MUST error so that in-flight reads surface a non-EOF error promptly rather than hang until read-timeout.
+
+This lets the caller-facing API stay uniform — downstream consumers read the body the same way whether the peer is streaming or not.
+
 ## 8. Request-Response Flow
 
 ### 8.1. Proxy Request Flow

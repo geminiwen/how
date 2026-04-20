@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -126,17 +127,37 @@ func TestCrossLanguage(t *testing.T) {
 		}
 	}()
 
-	// Helper to make a request with node crash detection.
-	doRequest := func(t *testing.T, req *protocol.HTTPRequestPayload) (*protocol.HTTPResponsePayload, error) {
+	// Helper to make a request with node crash detection. Buffers the whole
+	// response body so tests can keep comparing as []byte.
+	type bufferedResponse struct {
+		StatusCode uint16
+		Headers    map[string][]string
+		Body       []byte
+	}
+	doRequest := func(t *testing.T, req *protocol.HTTPRequestPayload) (*bufferedResponse, error) {
 		t.Helper()
 		type result struct {
-			resp *protocol.HTTPResponsePayload
+			resp *bufferedResponse
 			err  error
 		}
 		ch := make(chan result, 1)
 		go func() {
 			resp, err := caller.Request(ctx, req)
-			ch <- result{resp, err}
+			if err != nil {
+				ch <- result{nil, err}
+				return
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				ch <- result{nil, readErr}
+				return
+			}
+			ch <- result{&bufferedResponse{
+				StatusCode: resp.StatusCode,
+				Headers:    resp.Headers,
+				Body:       body,
+			}, nil}
 		}()
 		select {
 		case r := <-ch:

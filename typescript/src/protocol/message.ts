@@ -47,6 +47,19 @@ export interface HTTPResponsePayload {
   body?: Uint8Array;
 }
 
+/** Response surfaced to callers by `HOWCaller.request()`.
+ *  `body` is always a `ReadableStream<Uint8Array>` regardless of whether the
+ *  peer sent a single `HTTPResponse` (yields the full body then closes) or a
+ *  streaming `HTTPResponseStart` + Chunks + End (yields each chunk as it
+ *  arrives, closes on End, errors if transport dies mid-stream).
+ *  Callers should read via `getReader()` or `await new Response(body).text()` /
+ *  `.arrayBuffer()`. */
+export interface HOWResponse {
+  status_code: number;
+  headers: Record<string, string[]>;
+  body: ReadableStream<Uint8Array>;
+}
+
 export interface HTTPResponseStartPayload {
   status_code: number;
   headers: Record<string, string[]>;

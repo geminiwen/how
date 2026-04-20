@@ -23,4 +23,5 @@ export type {
   HTTPResponseStartPayload,
   HTTPResponseChunkPayload,
   ErrorPayload,
+  HOWResponse,
 } from "./message";

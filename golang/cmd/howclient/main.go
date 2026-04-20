@@ -58,6 +58,13 @@ func main() {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
+			// Signal-driven shutdown is a clean exit. An unexpected transport
+			// failure must exit non-zero so supervisors / health checks see
+			// the outage and restart / alert.
+			if ctx.Err() != nil {
+				log.Printf("read: %v (shutting down)", err)
+				return
+			}
 			log.Fatalf("read: %v", err)
 		}
 		h.HandleBinaryMessage(ctx, data)
