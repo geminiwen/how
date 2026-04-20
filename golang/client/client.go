@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime"
 	"sync"
 	"time"
 
@@ -179,14 +180,33 @@ func (c *Caller) readTimeout() time.Duration {
 // pending entry. Without this, an early Body.Close() would only be noticed
 // when the next chunk arrives (or on timeout / Caller.Close), leaking the
 // pending slot indefinitely for quiet streams.
+//
+// A finalizer is attached as a safety net: if the caller drops the Response
+// without calling Body.Close(), the pump would otherwise keep draining chunks
+// into an unbounded queue and the pending slot would survive until
+// Caller.Close or the parent ctx fires. The finalizer logs a loud warning
+// (the call site is a bug) and runs the same cleanup as Close.
 type cancellingBody struct {
 	pr     *io.PipeReader
 	cancel context.CancelFunc
 }
 
+func newCancellingBody(pr *io.PipeReader, cancel context.CancelFunc) *cancellingBody {
+	b := &cancellingBody{pr: pr, cancel: cancel}
+	runtime.SetFinalizer(b, func(b *cancellingBody) {
+		log.Printf("how: Response.Body was garbage-collected without Close(); leaked a pending request. Callers MUST Close() the body.")
+		b.cancel()
+		b.pr.Close()
+	})
+	return b
+}
+
 func (b *cancellingBody) Read(p []byte) (int, error) { return b.pr.Read(p) }
 
 func (b *cancellingBody) Close() error {
+	// Disarm the finalizer so it doesn't run (and log a spurious warning)
+	// once this body becomes unreachable after a proper Close.
+	runtime.SetFinalizer(b, nil)
 	b.cancel()
 	return b.pr.Close()
 }
@@ -306,7 +326,7 @@ func (c *Caller) requestBinary(ctx context.Context, requestID string, req *proto
 		return &Response{
 			StatusCode: start.StatusCode,
 			Headers:    start.Headers,
-			Body:       &cancellingBody{pr: pr, cancel: cancel},
+			Body:       newCancellingBody(pr, cancel),
 		}, nil
 
 	case protocol.TypeError:
@@ -323,6 +343,13 @@ func (c *Caller) requestBinary(ctx context.Context, requestID string, req *proto
 	}
 }
 
+// Note on timer reset window: Request() above creates its own timer for the
+// first wait (Start / HTTPResponse / Error), and the pump below creates a
+// fresh timer on entry. So the combined worst case between "HTTPResponseStart
+// arrived" and "the peer sends the first Chunk" is up to 2 × readTimeout (one
+// full period each side of the handoff). This is usually invisible because
+// real peers send Start and the first Chunk close together, but operators
+// tuning readTimeout to a tight value should be aware of it.
 func (c *Caller) pumpBinary(ctx context.Context, q *frameQueue[*protocol.Envelope], pw *io.PipeWriter, removePending func()) {
 	defer removePending()
 
@@ -458,7 +485,7 @@ func (c *Caller) requestText(ctx context.Context, requestID string, req *protoco
 		return &Response{
 			StatusCode: start.StatusCode,
 			Headers:    start.Headers,
-			Body:       &cancellingBody{pr: pr, cancel: cancel},
+			Body:       newCancellingBody(pr, cancel),
 		}, nil
 
 	case protocol.TypeError:

@@ -289,6 +289,13 @@ func (s *streamingResponseWriter) Write(p []byte) (int, error) {
 		// must return a non-nil error if it returns n < len(p)") lets the
 		// handler observe the problem the same way a closed TCP socket
 		// would: subsequent calls to fmt.Fprintf / w.Write stop working.
+		//
+		// Caveat: plain `w.Write(buf)` callers that ignore the returned
+		// (n, err) will NOT short-circuit on the first failure — each
+		// subsequent Write will re-attempt the send and keep returning
+		// the same error. Handlers that want to bail on transport death
+		// must use `fmt.Fprintf` (which propagates the error through its
+		// own return) or explicitly check the `Write` error.
 		return 0, err
 	}
 	return len(p), nil

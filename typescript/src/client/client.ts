@@ -187,6 +187,10 @@ export function createHOWCaller(sender: Sendable, options?: HOWCallerOptions): H
           // The HOW protocol has no upstream "cancel" message, so we can't tell
           // the peer to stop — but we drop our pending entry and release the
           // push callbacks so later chunks/end/error are no-ops.
+          //
+          // Note: `entry.resolve` fires below with this stream as `resp.body`
+          // before cancel can ever run, so there is no unresolved request
+          // promise here — no `entry.reject` call is needed on cancel.
           cancel: () => {
             clearTimer(entry);
             entry.streamPush = undefined;

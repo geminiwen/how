@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -993,15 +995,118 @@ func TestCallerBodyCloseClearsPending(t *testing.T) {
 	t.Fatalf("pending not cleared after Body.Close; still %d entries", n)
 }
 
+func TestCallerBodyFinalizerClearsPending(t *testing.T) {
+	// If a caller drops the Response without closing Body, a runtime finalizer
+	// on the streaming body must still run cleanup so the pending slot does
+	// not persist until the transport dies. The behavior under test:
+	//   1. Peer sends HTTPResponseStart then goes quiet.
+	//   2. Caller receives resp but never reads or Closes Body.
+	//   3. Reference is dropped; GC collects the body; finalizer cancels the
+	//      pump ctx; pump bails through ctxDone and removes pending.
+	// Finalizer output is silenced so the warning doesn't clutter test logs.
+	prevOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(prevOutput)
+
+	ctx := context.Background()
+
+	ts := startWSServer(t, func(srvCtx context.Context, conn *websocket.Conn) {
+		defer conn.CloseNow()
+		for {
+			_, data, err := conn.Read(srvCtx)
+			if err != nil {
+				return
+			}
+			env, err := protocol.Unmarshal(data)
+			if err != nil || env.Type != protocol.TypeHTTPRequest {
+				continue
+			}
+			sender := &wsSendable{conn: conn, ctx: srvCtx}
+			startEnv, _ := protocol.NewHTTPResponseStart(env.RequestID, 200, map[string][]string{"X-Demo": {"1"}})
+			startData, _ := protocol.Marshal(startEnv)
+			sender.SendBytes(startData)
+		}
+	})
+	defer ts.Close()
+
+	wsURL := "ws" + ts.URL[4:]
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	caller := NewCaller(&wsSendable{conn: conn, ctx: ctx})
+	caller.ReadTimeout = -1 // disable timeout; finalizer is the only cleanup path
+
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				caller.Close(err)
+				return
+			}
+			caller.HandleBinaryMessage(ctx, data)
+		}
+	}()
+
+	// Nested scope so the stack frame holding `resp` exits before GC runs —
+	// otherwise the body is still reachable on the parent stack and the
+	// finalizer never fires.
+	func() {
+		resp, err := caller.Request(ctx, &protocol.HTTPRequestPayload{
+			Method:  "GET",
+			URL:     "/leak",
+			Headers: map[string][]string{},
+		})
+		if err != nil {
+			t.Fatalf("Request: %v", err)
+		}
+		if resp.Headers["X-Demo"][0] != "1" {
+			t.Fatalf("headers missing")
+		}
+		// Deliberately do NOT Close resp.Body. Drop reference.
+	}()
+
+	// Two GC cycles: the first marks the body unreachable and queues its
+	// finalizer; the second gives the finalizer goroutine a chance to run
+	// (and any chain cleanup it kicks off).
+	runtime.GC()
+	runtime.GC()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		caller.mu.Lock()
+		n := len(caller.pending)
+		caller.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
+	caller.mu.Lock()
+	n := len(caller.pending)
+	caller.mu.Unlock()
+	t.Fatalf("pending not cleared after Body was GC'd; still %d entries", n)
+}
+
 func TestStreamingHandlerWriteReturnsErrWhenSenderFails(t *testing.T) {
 	// When the underlying transport rejects a send (peer ws gone), the
 	// http.Handler's w.Write(...) must return a non-nil error so the handler
 	// can stop its write loop instead of churning on a dead connection.
 	failingSender := &failingSenderT{fail: make(chan struct{})}
 
-	attempts := 0
-	writesAfterFail := 0
+	// Counters are touched from the dispatch goroutine (via the http.Handler)
+	// and read from the test goroutine after synchronization — atomics keep
+	// the race detector happy. The `done` channel closes when the handler
+	// body returns, so the test can wait for the exact moment the loop has
+	// completed instead of relying on a fixed sleep.
+	var attempts int32
+	var writesAfterFail int32
+	done := make(chan struct{})
 	httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(200)
 		// First write succeeds; sender failure is armed after.
@@ -1010,11 +1115,11 @@ func TestStreamingHandlerWriteReturnsErrWhenSenderFails(t *testing.T) {
 		}
 		close(failingSender.fail)
 		for i := 0; i < 50; i++ {
-			attempts++
+			atomic.AddInt32(&attempts, 1)
 			if _, err := fmt.Fprint(w, "more"); err != nil {
 				return // handler respects Write err and exits — this is what we want
 			}
-			writesAfterFail++
+			atomic.AddInt32(&writesAfterFail, 1)
 		}
 	})
 
@@ -1027,13 +1132,16 @@ func TestStreamingHandlerWriteReturnsErrWhenSenderFails(t *testing.T) {
 	data, _ := protocol.Marshal(env)
 	h.HandleBinaryMessage(context.Background(), data)
 
-	// Give dispatch goroutine time to complete.
-	time.Sleep(100 * time.Millisecond)
-
-	if writesAfterFail > 0 {
-		t.Fatalf("handler kept writing after first failure: %d successful writes after sender failed", writesAfterFail)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return within 2s — stuck in write loop?")
 	}
-	if attempts < 1 {
+
+	if n := atomic.LoadInt32(&writesAfterFail); n > 0 {
+		t.Fatalf("handler kept writing after first failure: %d successful writes after sender failed", n)
+	}
+	if n := atomic.LoadInt32(&attempts); n < 1 {
 		t.Fatalf("handler never tried a write after sender failure")
 	}
 }
