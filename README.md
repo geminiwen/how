@@ -18,16 +18,23 @@ Two roles, connected to your transport layer via the `Sendable` interface:
 - **Handler** — receives HTTP requests, dispatches to a local handler, sends back responses
 
 ```
-Your Caller Side                     Your Handler Side
-     │                                    │
-     │  caller.request(req)               │
-     │  ──── HTTPRequest ──────────────►  │  handler.handleBinaryMessage(data)
-     │                                    │  → invokes your handler
-     │  caller.handleBinaryMessage(data)  │
-     │  ◄──── HTTPResponse ────────────── │  → sends back response
-     │                                    │
-     └──── WebSocket / any transport ─────┘
+Your Caller Side                      Your Handler Side
+     │                                      │
+     │  caller.request(req)                 │
+     │  ──── HTTPRequest ────────────────►  │  → invokes your handler
+     │                                      │
+     │  Non-streaming peer:                 │
+     │  ◄──── HTTPResponse ──────────────── │  → full response in one frame
+     │                                      │
+     │  Streaming peer:                     │
+     │  ◄──── HTTPResponseStart ─────────── │  → status + headers
+     │  ◄──── HTTPResponseChunk ─────────── │  → body chunk (0..N times)
+     │  ◄──── HTTPResponseEnd ───────────── │  → clean EOF
+     │                                      │
+     └───── WebSocket / any transport ──────┘
 ```
+
+Either response shape is fed in through `caller.handleBinaryMessage` / `handleTextMessage`; on the caller side the two collapse into the same `ReadableStream` / `io.ReadCloser` body.
 
 `Sendable` is the only transport abstraction:
 
@@ -63,10 +70,13 @@ const sendable = {
   sendText: (data: string) => ws.send(data),
 };
 
-// Option 1: Forward to a local HTTP service (binary mode, default)
+// Option 1: Forward to a local HTTP service
+// (ForwardHandler always streams chunks as they arrive from upstream)
 const handler = createHOWHandler("http://localhost:3000", sendable);
 
-// Option 2: Pass a RequestListener directly
+// Option 2: Pass a RequestListener directly (buffered by default — the whole
+// response arrives as one HTTPResponse). Add `{ streaming: true }` to forward
+// every `res.write(chunk)` as a separate HTTPResponseChunk instead.
 const handler = createHOWHandler((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("hello");
@@ -114,32 +124,41 @@ ws.on("message", (data, isBinary) => {
   }
 });
 
-// Send a request
+// Send a request. `resp.body` is always a ReadableStream<Uint8Array>.
 const resp = await caller.request({
   method: "GET",
   url: "/api/hello",
   headers: {},
 });
 
-console.log(resp.status_code); // 200
-console.log(new TextDecoder().decode(resp.body)); // "hello"
+console.log(resp.status_code);                         // 200
+console.log(await new Response(resp.body).text());     // "hello"
 ```
 
 ### Streaming Responses
 
-When the Handler uses forward mode (string target), responses automatically use the streaming protocol. The `resp.body` received by the Caller is a `ReadableStream`:
+`resp.body` is always a `ReadableStream<Uint8Array>`. When the peer is non-streaming (single `HTTPResponse`), the stream yields the full body and closes; when the peer streams (`HTTPResponseStart` + chunks + `End`), each chunk arrives as it is produced. The reading code is identical either way:
 
 ```typescript
 const resp = await caller.request({ method: "GET", url: "/stream", headers: {} });
 
-const stream = resp.body as unknown as ReadableStream<Uint8Array>;
-const reader = stream.getReader();
+const reader = resp.body.getReader();
 while (true) {
   const { done, value } = await reader.read();
   if (done) break;
   process.stdout.write(value);
 }
 ```
+
+A Handler emits chunks when either:
+- the handler is a string target (ForwardHandler is always streaming), or
+- the handler is a `RequestListener` and `createHOWHandler` was called with `{ streaming: true }`.
+
+### Transport Lifecycle
+
+When the underlying WebSocket dies, call `caller.close(err)` — every pending request's body stream is errored with `err` (already-buffered chunks are delivered first), and further `request()` calls reject immediately. The call is idempotent.
+
+Read timeout defaults to 30s and resets on every received message; pass `{ readTimeout: ms }` to `createHOWCaller` to override, or `0` / a negative value to disable.
 
 ## Go
 
@@ -192,14 +211,18 @@ var upgrader = websocket.HertzUpgrader{}
 
 func main() {
     // Option 1: Forward to a local HTTP service
+    // (ForwardHandler always streams chunks as they arrive from upstream)
     handler, _ := client.ForwardTo("http://localhost:3000")
 
-    // Option 2: Wrap an http.Handler
+    // Option 2: Wrap an http.Handler — buffered by default. Add
+    // client.WithStreaming() to forward every w.Write as a separate
+    // HTTPResponseChunk, which matters for SSE and other long-lived responses.
     mux := http.NewServeMux()
     mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
         fmt.Fprint(w, "hello")
     })
     handler = client.HTTPHandler(mux)
+    // handler = client.HTTPHandler(mux, client.WithStreaming())
 
     h := server.Default(server.WithHostPorts("0.0.0.0:8888"))
     h.NoHijackConnPool = true
@@ -239,6 +262,7 @@ package main
 import (
     "context"
     "fmt"
+    "io"
     "log"
     "sync"
 
@@ -295,7 +319,9 @@ func main() {
         }
     }()
 
-    // Send a request (blocks until response)
+    // Send a request. resp.Body is an io.ReadCloser that you MUST close —
+    // otherwise the pending request leaks until the transport dies, and a
+    // finalizer will log a warning.
     resp, err := caller.Request(context.Background(), &protocol.HTTPRequestPayload{
         Method:  "GET",
         URL:     "/hello",
@@ -304,13 +330,21 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
+    defer resp.Body.Close()
 
-    fmt.Println(resp.StatusCode)    // 200
-    fmt.Println(string(resp.Body))  // "hello"
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(resp.StatusCode)  // 200
+    fmt.Println(string(body))     // "hello"
 }
 ```
 
-The Go Caller automatically merges streaming responses (Start + Chunks + End) into a complete `HTTPResponsePayload`.
+`resp.Body` yields bytes as they arrive: a non-streaming peer's buffered body reads out and then EOFs; a streaming peer's chunks read incrementally. For the common "just give me the whole body" case, use `io.ReadAll(resp.Body)` as above.
+
+When the underlying WebSocket dies, call `caller.Close(err)` — every pending `Body.Read` returns `err` (or `ErrTransportClosed` when `err` is nil), and further `Request` calls return the same error immediately. `Caller.ReadTimeout` defaults to 30s and resets on every received frame; set it to a negative duration to disable.
 
 ## Protocol
 
