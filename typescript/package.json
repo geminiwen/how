@@ -1,6 +1,6 @@
 {
-  "name": "how",
-  "version": "0.1.2",
+  "name": "@byted/how",
+  "version": "0.2.1",
   "description": "HTTP over WebSocket (HOW) - TypeScript implementation",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,7 +8,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap --target node18",
     "prepublishOnly": "npm run build",
     "test": "tsx --test src/**/*.test.ts",
     "client": "tsx src/cli/client.ts"
@@ -27,6 +27,7 @@
     "@types/node": "^25.3.5",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

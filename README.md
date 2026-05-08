@@ -62,7 +62,7 @@ Expose your HTTP handler or forward target over WebSocket:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWHandler } from "how";
+import { createHOWHandler } from "@byted/how";
 
 const ws = new WebSocket("ws://your-server/ws");
 const sendable = {
@@ -101,7 +101,7 @@ Send HTTP requests to a remote Handler:
 
 ```typescript
 import { WebSocket } from "ws";
-import { createHOWCaller } from "how";
+import { createHOWCaller } from "@byted/how";
 
 const ws = new WebSocket("ws://your-server/ws");
 const sendable = {
